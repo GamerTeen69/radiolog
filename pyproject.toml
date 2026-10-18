@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "radiolog"
+version = "1.0.1"
+description = "Log every song played on your PC — made for internet radio, works with any player"
+requires-python = ">=3.8"
+
+[project.optional-dependencies]
+# System mode on Windows (reads the media session). Install with:  pip install ".[windows]"
+windows = [
+    "winrt-runtime; sys_platform == 'win32'",
+    "winrt-Windows.Media.Control; sys_platform == 'win32'",
+    "winrt-Windows.Foundation; sys_platform == 'win32'",
+    "winrt-Windows.Foundation.Collections; sys_platform == 'win32'",
+    "winrt-Windows.Storage.Streams; sys_platform == 'win32'",
+]
+
+[project.scripts]
+radiolog = "radiolog:main"
+
+[tool.setuptools]
+py-modules = ["radiolog"]
