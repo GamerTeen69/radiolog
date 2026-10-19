@@ -21,7 +21,7 @@ Watching the system media session every 5s   (Ctrl+C to stop)
 ```
 
 **Contents:** [Features](#features) · [Requirements](#requirements) · [Install](#install) ·
-[Usage](#usage) · [Clear the history](#clear-the-history) · [Search or download](#search-or-download-a-song) · [Audio formats](#audio-formats) ·
+[Usage](#usage) · [Clear the history](#clear-the-history) · [Spotify playlists](#spotify-playlists) · [Search or download](#search-or-download-a-song) · [Audio formats](#audio-formats) ·
 [Setup and settings](#setup-and-settings) · [Troubleshooting](#troubleshooting) ·
 [Update / Uninstall](#update--uninstall)
 
@@ -41,6 +41,9 @@ Watching the system media session every 5s   (Ctrl+C to stop)
 - **Sort by artist, title or genre**, or list each song once with its play count. Genres are looked up
   automatically in free music databases.
 - **Find it again**: open any logged song in a YouTube, YouTube Music or Spotify search with one command.
+  Spotify searches open in the **Spotify app** when it's installed.
+- **Spotify playlists**: turn your history into playlists, from chosen songs, a day, a genre, or one
+  playlist per genre or artist (needs Spotify Premium and a one-time setup).
 - **Download in the best quality available** with a ready-made [yt-dlp](https://github.com/yt-dlp/yt-dlp)
   command: best audio stream with no re-encoding, cover art and tags (or the full video).
   Prefer **MP3** or **M4A** for older devices? Set it once with `radiolog config --format`.
@@ -181,7 +184,7 @@ Or directly, by number (leave the number out to use the last song):
 ```
 radiolog search 12                 # YouTube search in your browser
 radiolog search 12 --ytmusic       # YouTube Music
-radiolog search 12 --spotify       # Spotify
+radiolog search 12 --spotify       # Spotify (in the app if installed)
 radiolog download                  # the last song
 radiolog download 12               # best-quality audio
 radiolog download 12 --video       # best-quality video (saved as "… (video).mkv")
@@ -281,6 +284,58 @@ resolution. Install it with `winget install Gyan.FFmpeg` (Linux: `sudo apt insta
 Downloads use the first YouTube search result for *Artist - Title*. Please respect copyright and
 YouTube's terms in your country.
 
+## Spotify playlists
+
+Put songs from your history into playlists in your Spotify account:
+
+```
+radiolog playlist --today                          # today's songs
+radiolog playlist 3 5 8-12 --name "Road trip"      # chosen songs
+radiolog playlist --genre rock --name "Radio rock" # all rock songs
+radiolog playlist --by genre                       # one playlist per genre
+radiolog playlist --by artist --min 3              # one per artist with 3+ different songs
+radiolog playlist --since 7d --sort artist         # last week, A-Z by artist
+```
+
+In `radiolog pick`, select songs and press **[p]**.
+
+- Each song is looked up on Spotify once and remembered. Songs Spotify doesn't have are listed at the end.
+- **Running it again updates the playlist:** if a playlist with that name already exists in your account,
+  only the new songs are added, with no duplicates. Use `--new` for a separate playlist.
+- Playlists are private unless you add `--public`. `--by genre` / `--by artist` with `--name Radio`
+  name them *Radio · Rock*, *Radio · Punk*…; without `--name` they're called *radiolog · …*.
+
+### One-time setup (needs Spotify Premium)
+
+Spotify only lets small apps like radiolog create playlists through **your own Spotify developer app**,
+and its owner needs Premium
+([Spotify's rules](https://developer.spotify.com/documentation/web-api/concepts/quota-modes)). It's free
+and takes about 5 minutes:
+
+1. Open https://developer.spotify.com/dashboard and log in with your Spotify account.
+2. Click **Create app** and fill in:
+   - **App name:** `radiolog` (anything)
+   - **App description:** anything
+   - **Redirect URI:** `http://127.0.0.1:8888/callback`, typed exactly, then click **Add**
+   - **APIs used:** tick **Web API**
+
+   Accept the terms and click **Save**.
+3. Open the app's **Settings** and copy the **Client ID** (the Client secret isn't needed).
+4. Run `radiolog config --spotify-client-id YOUR_CLIENT_ID`
+
+The first time you create a playlist, your browser shows Spotify's **Allow** page. Click *Agree* and
+radiolog stays connected. Your password never goes through radiolog. `radiolog playlist --setup` shows
+these steps, and `radiolog config --spotify-logout` disconnects.
+
+radiolog doesn't contain anyone's Client ID: everyone who wants playlists makes their own app. You can
+let up to 5 friends use yours by adding their Spotify emails under *User Management* in your app.
+
+### Spotify app or browser
+
+`radiolog search NUMBER --spotify` and **[s]** in `pick` open the search in the **Spotify app** if it's
+installed, otherwise in the browser. Add `--web` to use the browser once, or choose permanently with
+`radiolog config --spotify-open auto|app|web`.
+
 ## Setup and settings
 
 ### First-time setup
@@ -327,6 +382,9 @@ Settings file: C:\Users\you\AppData\Roaming\radiolog\config.json
 | *(none)* | Show where the history and downloads are, the audio format, how many songs are logged, and whether the history location is writable |
 | `--db LOCATION` | Store the song history somewhere else: a folder or a full file path. Your existing history is moved there (radiolog asks first). If a history file already exists at the new place, radiolog switches to it and doesn't move anything. |
 | `--downloads FOLDER` | Save future downloads in this folder. Files you already downloaded stay where they are. |
+| `--spotify-client-id ID` | Your Spotify app's Client ID, for [Spotify playlists](#spotify-playlists) |
+| `--spotify-logout` | Disconnect radiolog from your Spotify account (the Client ID is kept) |
+| `--spotify-open MODE` | Where Spotify searches open: `auto` (the app if installed, default), `app` or `web` |
 | `--organize LAYOUT` | How downloads are sorted into folders: `flat`, `artist`, `genre` or `genre-artist`. See [Sorting downloads](#sorting-downloads-by-genre-or-artist). |
 | `--format FORMAT` | Audio format for downloads: `best`, `opus`, `m4a` or `mp3`. See [Audio formats](#audio-formats). |
 | `--reset` | Forget all settings (history location, download folder, audio format), so the first-time setup runs again on the next start. Your history file and downloaded songs are **not** deleted. |
@@ -391,6 +449,13 @@ name, download it yourself: `yt-dlp -x "VIDEO_LINK"`. In a batch, these songs ar
 **`.png` / `.webp` files next to my songs**: those are cover images that versions before 1.5
 couldn't embed. radiolog now removes such leftovers when it downloads or skips that song; you can
 also just delete them.
+
+**Spotify: "Port 8888 is busy"**: another program uses that port during the login. Close it and try
+again (it's only needed for the few seconds of the login).
+
+**Spotify: "forbidden (403)"** or **"INVALID_CLIENT"**: check that your Spotify Premium is active, that
+the Client ID is right (`radiolog config`), and that the Redirect URI in your Spotify app is exactly
+`http://127.0.0.1:8888/callback`. Someone else using your app must be listed under *User Management*.
 
 **I cleared songs by mistake**: every `radiolog clear` saves a backup first. Stop `radiolog watch`
 if it's running, then copy the newest `radiolog-backup-….db` (in the same folder as your database,

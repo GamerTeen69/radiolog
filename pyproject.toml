@@ -23,4 +23,4 @@ windows = [
 radiolog = "radiolog:main"
 
 [tool.setuptools]
-py-modules = ["radiolog"]
+py-modules = ["radiolog", "radiolog_spotify"]

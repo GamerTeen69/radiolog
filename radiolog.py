@@ -40,6 +40,11 @@ Clear the history (asks first, saves a backup; downloads are not touched)
     radiolog clear 3 5 8-12              delete chosen songs
     radiolog clear --until 30d           delete songs older than 30 days
 
+Spotify playlists (needs Premium + a one-time setup: radiolog playlist --setup)
+    radiolog playlist --today            today's songs into a playlist
+    radiolog playlist --genre rock --name "Radio rock"
+    radiolog playlist --by genre         one playlist per genre (or --by artist)
+
 Settings
     radiolog config                      show where the history and downloads are
     radiolog config --db LOCATION        move the song history (folder or file path)
@@ -166,10 +171,15 @@ def check_writable(db_path):
         return False, e
 
 
+INPUT_CLOSED = False             # set when the keyboard input has ended (e.g. piped input ran out)
+
+
 def ask(prompt, default=""):
+    global INPUT_CLOSED
     try:
         answer = input(prompt).strip()
     except EOFError:
+        INPUT_CLOSED = True
         answer = ""
     return answer or default
 
@@ -344,6 +354,14 @@ def db_connect():
            )"""
     )
     con.execute("CREATE INDEX IF NOT EXISTS idx_played_at ON plays(played_at)")
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS spotify_tracks (
+               song_key   TEXT PRIMARY KEY,   -- same key as genres
+               uri        TEXT,               -- spotify:track:… ; '' = not found on Spotify
+               name       TEXT,               -- 'Artist - Title' as Spotify has it
+               checked_at TEXT
+           )"""
+    )
     con.execute(
         """CREATE TABLE IF NOT EXISTS genres (
                song_key   TEXT PRIMARY KEY,   -- lower(artist) + '\x1f' + lower(title)
@@ -953,8 +971,20 @@ def search_url(service, artist, title):
 SERVICE_NAMES = {"youtube": "YouTube", "ytmusic": "YouTube Music", "spotify": "Spotify"}
 
 
-def open_search(service, artist, title):
+def spotify_open_mode():
+    mode = load_config().get("spotify_open") or "auto"
+    return mode if mode in ("auto", "app", "web") else "auto"
+
+
+def open_search(service, artist, title, web=False):
     url = search_url(service, artist, title)
+    if service == "spotify" and not web and spotify_open_mode() != "web":
+        import radiolog_spotify as sp
+        if spotify_open_mode() == "app" or sp.app_installed():
+            print(f"Opening the Spotify app: {song_query(artist, title)}")
+            if sp.open_uri(sp.search_uri(song_query(artist, title))):
+                return
+            print("  (couldn't open the app, using the browser)")
     print(f"Opening {SERVICE_NAMES[service]}: {song_query(artist, title)}")
     if not webbrowser.open(url):
         print(f"Couldn't open a browser. Here's the link:\n  {url}")
@@ -1358,7 +1388,7 @@ def batch_download(songs, folder=None, video=False, print_only=False, confirm=Tr
 
 def cmd_search(args):
     _, artist, title = get_song(args.song)
-    open_search(args.service, artist, title)
+    open_search(args.service, artist, title, web=args.web)
 
 
 def has_filters(args):
@@ -1393,6 +1423,8 @@ def cmd_pick(args):
     try:
         while True:
             choice = ask(f"\nSong number(s) [{default}] (q to quit): ", default).strip().lower()
+            if INPUT_CLOSED:
+                return
             if choice in ("q", "quit", "exit"):
                 return
             try:
@@ -1411,8 +1443,9 @@ def cmd_pick(args):
                 print(f"\n  ♪ {song_query(artist, title)}\n"
                       "  [y] search on YouTube      [m] YouTube Music     [s] Spotify\n"
                       f"  [d] download audio ({audio_format():<4})  [v] download video    [c] show yt-dlp command\n"
+                      "  [p] add to a Spotify playlist\n"
                       "  [b] back to the list       [q] quit")
-                valid = "ymsdvcbq"
+                valid = "ymsdvcpbq"
             else:
                 songs = unique_songs(songs)
                 print(f"\n  ♪ {len(songs)} songs selected")
@@ -1421,11 +1454,14 @@ def cmd_pick(args):
                 if len(songs) > 5:
                     print(f"     … and {len(songs) - 5} more")
                 print(f"  [d] download all ({audio_format()})   [v] download all (video)   [c] show yt-dlp commands\n"
+                      "  [p] make a Spotify playlist\n"
                       "  [b] back to the list       [q] quit")
-                valid = "dvcbq"
+                valid = "dvcpbq"
 
             while True:
                 action = ask("  Action: ", "b").lower()
+                if INPUT_CLOSED:
+                    return
                 if action not in valid:
                     print(f"  Choose one of: {', '.join(valid)}")
                     continue
@@ -1444,8 +1480,191 @@ def cmd_pick(args):
                     batch_download(songs, args.dir, video=(action == "v"), confirm=False)
                 elif action == "c":
                     batch_download(songs, args.dir, print_only=True)
+                elif action == "p":
+                    default = f"radiolog · {datetime.now():%Y-%m-%d}"
+                    name = ask(f"  Playlist name [{default}] (an existing one gets the songs added): ", default)
+                    try:
+                        make_playlists([(name, songs)], confirm=False, offer_open=False)
+                    except SystemExit as e:
+                        print(e)
     except KeyboardInterrupt:
         print()
+
+
+# --------------------------------------------------------------------------- spotify playlists
+
+def spotify_client():
+    import radiolog_spotify as sp
+    cid = load_config().get("spotify_client_id")
+    if not cid:
+        raise SystemExit(sp.SETUP_HELP)
+    return sp.SpotifyClient(cid, config_file().parent / "spotify_token.json", user_agent=USER_AGENT)
+
+
+def spotify_matches(client, songs):
+    """{(artist, title): track dict or None}, using and filling the remembered matches."""
+    con = db_connect()
+    out, todo = {}, []
+    for _, artist, title in songs:
+        row = con.execute("SELECT uri, name, checked_at FROM spotify_tracks WHERE song_key = ?",
+                          (song_key(artist, title),)).fetchone()
+        if row and (row[0] or datetime.now() - datetime.fromisoformat(row[2]) < timedelta(days=30)):
+            out[(artist, title)] = dict(uri=row[0], name=row[1]) if row[0] else None
+        else:
+            todo.append((artist, title))
+    if todo:
+        print(f"Finding {len(todo)} song(s) on Spotify…", flush=True)
+        try:
+            for n, (artist, title) in enumerate(todo, 1):
+                tr = client.find_track(artist, title)
+                out[(artist, title)] = tr
+                con.execute("INSERT OR REPLACE INTO spotify_tracks (song_key, uri, name, checked_at) "
+                            "VALUES (?,?,?,?)",
+                            (song_key(artist, title), tr["uri"] if tr else "",
+                             f"{tr['artists']} - {tr['name']}" if tr else "",
+                             datetime.now().isoformat(timespec="seconds")))
+                con.commit()
+                if sys.stdout.isatty():
+                    print(f"\r  {n}/{len(todo)}  {(artist + ' — ' + title)[:50]:50}", end="", flush=True)
+        except KeyboardInterrupt:
+            print("\n(stopped searching; the songs found so far are used)")
+        if sys.stdout.isatty():
+            print("\r" + " " * 70 + "\r", end="")
+    return out
+
+
+def playlist_groups(args, songs):
+    """[(playlist name, songs)] according to --by / --name."""
+    prefix = args.name
+    if args.by == "genre":
+        genres = genres_for([(s[0], "", s[1], s[2], "") for s in songs])
+        groups = {}
+        for s in songs:
+            groups.setdefault(genres.get(s[0]) or "", []).append(s)
+        if "" in groups:
+            print(f"({len(groups.pop(''))} song(s) with an unknown genre are left out)")
+        named = [(f"{prefix or 'radiolog'} · {g}", m) for g, m in sorted(groups.items(), key=lambda x: x[0].lower())]
+    elif args.by == "artist":
+        groups = {}
+        for s in songs:
+            groups.setdefault((s[1] or "Unknown artist").strip(), []).append(s)
+        small = [a for a, m in groups.items() if len(m) < args.min]
+        for a in small:
+            groups.pop(a)
+        if small:
+            print(f"({len(small)} artist(s) with fewer than {args.min} song(s) are left out; change with --min)")
+        named = [(f"{prefix or 'radiolog'} · {a}", m) for a, m in sorted(groups.items(), key=lambda x: sort_key_text(x[0]))]
+    else:
+        if prefix:
+            name = prefix
+        elif getattr(args, "genre", None):
+            name = f"radiolog · {args.genre.title()}"
+        elif args.today:
+            name = f"radiolog · {datetime.now():%Y-%m-%d}"
+        else:
+            name = f"radiolog · {datetime.now():%Y-%m-%d %H:%M}"
+        named = [(name, songs)]
+    return [(n, sort_rows_simple(m, args.sort)) for n, m in named]
+
+
+def sort_rows_simple(songs, how):
+    if how == "artist":
+        return sorted(songs, key=lambda s: (sort_key_text(s[1]), sort_key_text(s[2])))
+    if how == "title":
+        return sorted(songs, key=lambda s: (sort_key_text(s[2]), sort_key_text(s[1])))
+    return songs
+
+
+def make_playlists(groups, public=False, new=False, confirm=True, offer_open=True):
+    if not groups:
+        print("Nothing to put in a playlist.")
+        return
+    total = sum(len(m) for _, m in groups)
+    print(f"\n{'Playlist' if len(groups) == 1 else str(len(groups)) + ' playlists'} on Spotify "
+          f"({'public' if public else 'private'}):")
+    for name, members in groups[:15]:
+        print(f"  • {name}  ({len(members)} song{'s' if len(members) != 1 else ''})")
+    if len(groups) > 15:
+        print(f"  … and {len(groups) - 15} more")
+    if confirm and sys.stdin.isatty():
+        if ask(f"\nCreate {'it' if len(groups) == 1 else 'them'}? [Y/n]: ", "y").lower() not in ("y", "yes", "t", "tak"):
+            print("Cancelled.")
+            return
+
+    import radiolog_spotify as sp
+    client = spotify_client()
+    try:
+        client.ensure_login()
+        all_songs = unique_songs([s for _, m in groups for s in m])
+        found = spotify_matches(client, all_songs)
+        existing = {} if new else {p.get("name"): p for p in client.my_playlists()
+                                   if p.get("owner", {}).get("id") and p.get("name")}
+        me = client.me().get("id") if not new else None
+        results, missing = [], [song_query(a, t) for (a, t), tr in found.items() if not tr]
+        for name, members in groups:
+            uris = list(dict.fromkeys(found[(a, t)]["uri"] for _, a, t in members if found.get((a, t))))
+            if not uris:
+                results.append((name, None, 0, "no songs found on Spotify"))
+                continue
+            pl = existing.get(name)
+            if pl and (pl.get("owner") or {}).get("id") == me:
+                have = client.playlist_uris(pl["id"])
+                add = [u for u in uris if u not in have]
+                if add:
+                    client.add_items(pl["id"], add)
+                results.append((name, pl, len(add), f"updated, {len(uris) - len(add)} already in it"))
+            else:
+                pl = client.create_playlist(
+                    name, "Songs heard on the radio, collected with radiolog "
+                          "(github.com/GamerTeen69/radiolog)", public)
+                client.add_items(pl["id"], uris)
+                results.append((name, pl, len(uris), "new"))
+    except sp.SpotifyError as e:
+        raise SystemExit(f"✖ {e}")
+    except OSError as e:
+        raise SystemExit(f"✖ Couldn't reach Spotify ({e}). Check your internet connection.")
+
+    print("\n" + "─" * 50)
+    for name, pl, added, note in results:
+        if pl:
+            url = (pl.get("external_urls") or {}).get("spotify", "")
+            print(f"✔ {name}: {added} song(s) added ({note})" + (f"\n    {url}" if url else ""))
+        else:
+            print(f"✖ {name}: {note}")
+    if missing:
+        print(f"\n? Not on Spotify ({len(missing)}):")
+        for m in missing[:20]:
+            print(f"   {m}")
+        if len(missing) > 20:
+            print(f"   … and {len(missing) - 20} more")
+    first = next((pl for _, pl, _, _ in results if pl), None)
+    if first and len(results) == 1 and offer_open and sys.stdin.isatty():
+        if ask("\nOpen the playlist? [Y/n]: ", "y").lower() in ("y", "yes", "t", "tak"):
+            uri, url = first.get("uri"), (first.get("external_urls") or {}).get("spotify")
+            if not (uri and spotify_open_mode() != "web" and sp.app_installed() and sp.open_uri(uri)):
+                if url:
+                    webbrowser.open(url)
+
+
+def cmd_playlist(args):
+    if args.songs and has_filters(args):
+        raise SystemExit("Use either song numbers or filters (--today, --since, --genre…), not both.")
+    if not load_config().get("spotify_client_id"):
+        import radiolog_spotify as sp
+        raise SystemExit(sp.SETUP_HELP)
+    if args.songs:
+        songs = songs_from_ids(parse_song_refs(args.songs))
+    else:
+        rows, _ = select_rows(args, default_limit=50)
+        songs = [(r[0], r[2], r[3]) for r in rows]
+        if not has_filters(args) and args.limit is None:
+            print(f"(no selection given: using your last {len(songs)} songs; "
+                  "use --today, --genre, song numbers… to choose)")
+    songs = unique_songs(songs)
+    if not songs:
+        print("No songs match.")
+        return
+    make_playlists(playlist_groups(args, songs), public=args.public, new=args.new, confirm=not args.yes)
 
 
 # --------------------------------------------------------------------------- clear
@@ -1660,6 +1879,30 @@ def cmd_config(args):
               "(Your existing history file was not touched.)")
         return
 
+    if args.spotify_client_id or args.spotify_logout or args.spotify_open:
+        if args.spotify_client_id:
+            cid = args.spotify_client_id.strip()
+            if not re.fullmatch(r"[0-9a-fA-F]{32}", cid):
+                print("⚠ That doesn't look like a Client ID (32 letters/digits from your app's Settings).")
+                if ask("Save it anyway? [y/N]: ", "n").lower() not in ("y", "yes", "t", "tak"):
+                    return
+            save_config({"spotify_client_id": cid})
+            try:
+                (config_file().parent / "spotify_token.json").unlink()
+            except FileNotFoundError:
+                pass
+            print("✔ Spotify Client ID saved. The first 'radiolog playlist' asks you to allow access in the browser.")
+        if args.spotify_logout:
+            try:
+                (config_file().parent / "spotify_token.json").unlink()
+                print("✔ Logged out of Spotify (the Client ID is kept).")
+            except FileNotFoundError:
+                print("You weren't logged in to Spotify.")
+        if args.spotify_open:
+            save_config({"spotify_open": args.spotify_open})
+            print(f"✔ Spotify searches will open: {args.spotify_open}")
+        return
+
     if args.organize:
         save_config({"download_layout": args.organize})
         print(f"✔ Downloads will be organized: {args.organize}  ({LAYOUTS[args.organize]})")
@@ -1716,6 +1959,13 @@ def cmd_config(args):
     print(f"Downloads:     {default_download_dir()}")
     print(f"Audio format:  {audio_format()}  ({AUDIO_FORMATS[audio_format()]})")
     print(f"Organize:      {layout()}  ({LAYOUTS[layout()].split(':')[0].strip()})")
+    cfg = load_config()
+    if cfg.get("spotify_client_id"):
+        logged = (config_file().parent / "spotify_token.json").exists()
+        print(f"Spotify:       Client ID set, {'logged in' if logged else 'not logged in yet'}; "
+              f"searches open: {spotify_open_mode()}")
+    else:
+        print(f"Spotify:       playlists not set up (radiolog playlist --setup); searches open: {spotify_open_mode()}")
     print(f"Settings file: {config_file()}")
     if os.environ.get("RADIOLOG_DB"):
         print(f"Note: RADIOLOG_DB is set, so {os.environ['RADIOLOG_DB']} is used instead.")
@@ -1818,6 +2068,7 @@ def main():
             "  radiolog config --downloads D:\\Music          save downloads there from now on\n"
             "  radiolog config --format mp3                  download songs as .mp3 from now on\n"
             "  radiolog config --organize genre-artist       downloads into Genre\\Artist folders\n"
+            "  radiolog config --spotify-client-id ID        for Spotify playlists (radiolog playlist --setup)\n"
             "  radiolog config --reset                       run the first-time setup again\n\n"
             "Settings file: %APPDATA%\\radiolog\\config.json (Linux: ~/.config/radiolog/config.json)."))
     c.add_argument("--db", metavar="LOCATION",
@@ -1827,6 +2078,11 @@ def main():
     c.add_argument("--downloads", metavar="FOLDER",
                    help="save future downloads in this folder (already downloaded files stay "
                         "where they are). Default: Music\\radiolog in your user folder")
+    c.add_argument("--spotify-client-id", metavar="ID",
+                   help="your Spotify app's Client ID, for 'radiolog playlist' (setup: radiolog playlist --setup)")
+    c.add_argument("--spotify-logout", action="store_true", help="forget the Spotify login")
+    c.add_argument("--spotify-open", choices=["auto", "app", "web"],
+                   help="where Spotify searches open: auto (the app if installed, default), app, or web")
     c.add_argument("--organize", choices=list(LAYOUTS),
                    help="how downloads are sorted into folders: flat (default, one folder), artist, "
                         "genre, or genre-artist (genre, then artist)")
@@ -1857,7 +2113,9 @@ def main():
             "ranges (3 5 8-12) or 'all' to select more than one.\n\n"
             "For one song:   [y] YouTube  [m] YouTube Music  [s] Spotify\n"
             "                [d] download audio  [v] download video  [c] show yt-dlp command\n"
+            "                [p] add to a Spotify playlist\n"
             "For several:    [d] download all (audio)  [v] all (video)  [c] show commands\n"
+            "                [p] make a Spotify playlist\n"
             "Always:         [b] back to the list  [q] quit\n\n"
             "Audio is saved in your chosen format (see: radiolog config --help)."),
         epilog=(
@@ -1869,6 +2127,35 @@ def main():
     k.add_argument("--dir", help="save downloads into this folder this time (setting unchanged)")
     k.add_argument("--organize", choices=list(LAYOUTS),
                    help="sort downloads into folders this time: flat, artist, genre or genre-artist")
+
+    pl = sub.add_parser(
+        "playlist", help="create Spotify playlists from your songs (all, chosen, by genre or by artist)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Put logged songs into a Spotify playlist in your account. Each song is found on\n"
+            "Spotify (remembered for next time); songs Spotify doesn't have are listed at the end.\n\n"
+            "If a playlist with that name already exists in your account, the new songs are\n"
+            "added to it (no duplicates), so running the same command again keeps it up to date.\n"
+            "Use --new for a separate playlist.\n\n"
+            "Needs Spotify Premium and a one-time setup of your own Spotify app:\n"
+            "  radiolog playlist --setup"),
+        epilog=(
+            "examples:\n"
+            "  radiolog playlist --today                        today's songs\n"
+            "  radiolog playlist 3 5 8-12 --name \"Road trip\"     chosen songs\n"
+            "  radiolog playlist --genre rock --name \"Radio rock\"\n"
+            "  radiolog playlist --by genre                     one playlist per genre\n"
+            "  radiolog playlist --by artist --min 3            one per artist with 3+ songs\n"
+            "  radiolog playlist --since 7d --sort artist       last week, A-Z by artist"))
+    pl.add_argument("songs", nargs="*", metavar="SONG", help="song numbers or ranges from 'show'")
+    add_filters(pl)
+    pl.add_argument("--name", help="playlist name (with --by: the name's prefix, e.g. 'Radio' -> 'Radio · Rock')")
+    pl.add_argument("--by", choices=["genre", "artist"], help="make one playlist per genre or per artist")
+    pl.add_argument("--min", type=int, default=2, help="with --by artist: only artists with at least this many songs (default 2)")
+    pl.add_argument("--public", action="store_true", help="make the playlist public (default: private)")
+    pl.add_argument("--new", action="store_true", help="always create a new playlist, even if the name exists")
+    pl.add_argument("-y", "--yes", action="store_true", help="don't ask before creating")
+    pl.add_argument("--setup", action="store_true", help="show how to set up Spotify playlists")
 
     u = sub.add_parser(
         "update", help="update radiolog to the newest release from GitHub",
@@ -1914,8 +2201,10 @@ def main():
     x.add_argument("--no-backup", action="store_true", help="don't save a backup copy first")
 
     f = sub.add_parser(
-        "search", help="search a song on YouTube or Spotify (opens the browser)", formatter_class=argparse.RawDescriptionHelpFormatter,
-        description="Open a search for a logged song (\"Artist - Title\") in your web browser.",
+        "search", help="search a song on YouTube or Spotify (Spotify: in the app if installed)", formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=("Open a search for a logged song (\"Artist - Title\") in your web browser.\n"
+                     "Spotify searches open in the Spotify app when it's installed (see\n"
+                     "radiolog config --spotify-open); add --web to use the browser."),
         epilog=(
             "examples:\n"
             "  radiolog search              last song, on YouTube\n"
@@ -1929,6 +2218,7 @@ def main():
     svc.add_argument("--ytmusic", dest="service", action="store_const", const="ytmusic", help="YouTube Music")
     svc.add_argument("--spotify", dest="service", action="store_const", const="spotify", help="Spotify")
     f.set_defaults(service="youtube")
+    f.add_argument("--web", action="store_true", help="Spotify: open in the browser even if the app is installed")
 
     d = sub.add_parser(
         "download", help="download songs with yt-dlp in the best quality available", formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1985,10 +2275,17 @@ def main():
         if args.cmd == "config":
             cmd_config(args)
             return
+        if args.cmd == "playlist" and args.setup:
+            import radiolog_spotify as sp
+            print(sp.SETUP_HELP)
+            return
         if args.cmd == "update":
             cmd_update(args)
             return
         DB_PATH = resolve_db_path()
+        if args.cmd == "playlist":
+            cmd_playlist(args)
+            return
         if args.cmd == "clear":
             cmd_clear(args)
             return
