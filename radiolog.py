@@ -41,6 +41,7 @@ Clear the history (asks first, saves a backup; downloads are not touched)
     radiolog clear --until 30d           delete songs older than 30 days
 
 Spotify playlists (needs Premium + a one-time setup: radiolog playlist --setup)
+    radiolog playlist --all              every song in your history into a playlist
     radiolog playlist --today            today's songs into a playlist
     radiolog playlist --genre rock --name "Radio rock"
     radiolog playlist --by genre         one playlist per genre (or --by artist)
@@ -677,7 +678,10 @@ def query_rows(args, default_limit=50):
     if args.search:
         sql += " AND (artist LIKE ? OR title LIKE ?)"; params += [f"%{args.search}%"] * 2
     sql += " ORDER BY played_at DESC, id DESC"
-    limit = args.limit if args.limit is not None else (None if (since or args.until) else default_limit)
+    if getattr(args, "all", False):
+        limit = args.limit                    # --all: no default limit (an explicit -n still applies)
+    else:
+        limit = args.limit if args.limit is not None else (None if (since or args.until) else default_limit)
     if limit is not None:
         sql += " LIMIT ?"; params.append(limit)
     return list(reversed(con.execute(sql, params).fetchall()))
@@ -853,7 +857,8 @@ def select_rows(args, default_limit):
         genres = genres_for(rows)
         if want_genre:
             rows = [r for r in rows if want_genre.lower() in (genres.get(r[0]) or "").lower()]
-    if (want_genre or how != "time") and explicit is None and not timed and default_limit:
+    if (want_genre or how != "time") and explicit is None and not timed and default_limit \
+            and not getattr(args, "all", False):
         rows = rows[-default_limit:]                      # newest N of the matches
     return sort_rows(rows, how, genres), genres
 
@@ -1392,7 +1397,8 @@ def cmd_search(args):
 
 
 def has_filters(args):
-    return any([args.today, args.since, args.until, args.search, getattr(args, "genre", None)])
+    return any([args.today, args.since, args.until, args.search, getattr(args, "genre", None),
+                getattr(args, "all", False)])
 
 
 def cmd_download(args):
@@ -1400,7 +1406,7 @@ def cmd_download(args):
     FORMAT_OVERRIDE = args.format
     LAYOUT_OVERRIDE = args.organize
     if args.songs and has_filters(args):
-        raise SystemExit("Use either song numbers or filters (--today, --since, --search…), not both.")
+        raise SystemExit("Use either song numbers or a selection (--all, --today, --since, --genre…), not both.")
     if has_filters(args) or (args.sort != "time" and not args.songs):
         rows, _ = select_rows(args, default_limit=None)
         songs = [(r[0], r[2], r[3]) for r in rows]
@@ -1559,6 +1565,8 @@ def playlist_groups(args, songs):
             name = prefix
         elif getattr(args, "genre", None):
             name = f"radiolog · {args.genre.title()}"
+        elif getattr(args, "all", False) and not (args.today or args.since or args.until or args.search):
+            name = "radiolog · All songs"
         elif args.today:
             name = f"radiolog · {datetime.now():%Y-%m-%d}"
         else:
@@ -1648,7 +1656,7 @@ def make_playlists(groups, public=False, new=False, confirm=True, offer_open=Tru
 
 def cmd_playlist(args):
     if args.songs and has_filters(args):
-        raise SystemExit("Use either song numbers or filters (--today, --since, --genre…), not both.")
+        raise SystemExit("Use either song numbers or a selection (--all, --today, --since, --genre…), not both.")
     if not load_config().get("spotify_client_id"):
         import radiolog_spotify as sp
         raise SystemExit(sp.SETUP_HELP)
@@ -1672,7 +1680,7 @@ def cmd_playlist(args):
 def cmd_clear(args):
     """Delete songs from the history: everything, chosen numbers, or a filtered selection."""
     if args.songs and has_filters(args):
-        raise SystemExit("Use either song numbers or filters (--today, --since, --until, --search, --genre), not both.")
+        raise SystemExit("Use either song numbers or a selection (--all, --today, --since, --until, --search, --genre), not both.")
     con = db_connect()
 
     if args.songs:
@@ -2024,6 +2032,7 @@ def main():
             "examples:\n"
             "  radiolog show\n"
             "  radiolog show --today\n"
+            "  radiolog show --all                   the whole history\n"
             "  radiolog show --since 3h --search queen\n"
             "  radiolog show --since \"2026-10-18 20:00\" --until \"2026-10-18 23:00\"\n"
             "  radiolog show --today --csv today.csv\n"
@@ -2036,6 +2045,7 @@ def main():
     s.add_argument("--until", help="same formats as --since")
     s.add_argument("--search", help="filter by artist or title text")
     s.add_argument("-n", "--limit", type=int, default=None, help="max songs (default: 50 without a time filter)")
+    s.add_argument("--all", action="store_true", help="all songs in the history (no 50-song limit)")
     s.add_argument("--csv", metavar="FILE", help="export the selection to a CSV file instead of printing")
     s.add_argument("--no-source", action="store_true", help="hide the station/player column")
     s.add_argument("--sort", choices=["time", "artist", "title", "genre"], default="time",
@@ -2100,6 +2110,8 @@ def main():
         sp.add_argument("--until", help="same formats as --since")
         sp.add_argument("--search", help="filter by artist or title text")
         sp.add_argument("-n", "--limit", type=int, default=None, help="max songs")
+        sp.add_argument("--all", action="store_true",
+                        help="all songs in the history (no default limit); combine with other filters if you like")
         sp.add_argument("--genre", metavar="TEXT",
                         help="only songs whose genre contains TEXT (rock, pop, rap…; looked up online once)")
         sp.add_argument("--sort", choices=["time", "artist", "title", "genre"], default="time",
@@ -2141,6 +2153,7 @@ def main():
             "  radiolog playlist --setup"),
         epilog=(
             "examples:\n"
+            "  radiolog playlist --all                          every song in your history\n"
             "  radiolog playlist --today                        today's songs\n"
             "  radiolog playlist 3 5 8-12 --name \"Road trip\"     chosen songs\n"
             "  radiolog playlist --genre rock --name \"Radio rock\"\n"
@@ -2240,6 +2253,7 @@ def main():
             "  radiolog download 12                  song #12\n"
             "  radiolog download 3 5 8-12            several songs and a range\n"
             "  radiolog download --today             everything heard today (asks first)\n"
+            "  radiolog download --all               every song in your history (asks first)\n"
             "  radiolog download --since 3h -y       last 3 hours, without asking\n"
             "  radiolog download 12 --video\n"
             "  radiolog download 12 --format mp3     as .mp3 this time\n"

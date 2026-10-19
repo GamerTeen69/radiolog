@@ -96,6 +96,7 @@ Stop with **Ctrl+C**.
 
 ```
 radiolog show                                    # last 50 songs
+radiolog show --all                              # the whole history
 radiolog show --today
 radiolog show --since 3h
 radiolog show --since yesterday
@@ -113,6 +114,7 @@ radiolog show --genre rock --today               # today's rock songs
 | `--since`, `--until` | `30m`, `3h`, `2d`, `1w`, `today`, `yesterday`, `20:00`, `2026-10-18 20:00` |
 | `--search TEXT` | match artist or title |
 | `-n`, `--limit N` | maximum number of songs |
+| `--all` | all songs in the history (no 50-song limit) |
 | `--csv FILE` | save the selection as CSV instead of printing |
 | `--no-source` | hide the station / player name |
 | `--sort ORDER` | `time` (default), `artist` (A-Z), `title` (A-Z) or `genre` (grouped under genre headings) |
@@ -132,6 +134,9 @@ Ctrl+C skips the rest). After that it's instant. Songs no database knows are lis
 (and *plays* with `--unique`).
 
 Every song has a number (`#12`), which the commands below use.
+
+**`--all`** works with `show`, `pick`, `download`, `playlist` and `clear`: it takes every song in your
+history instead of the latest ones, and can be combined with other filters (`--all --genre rock`).
 
 ### Clear the history
 
@@ -161,6 +166,7 @@ The easiest way is the interactive menu: pick a song from the list, then choose 
 ```
 radiolog pick                      # last 20 songs (accepts the same filters as show)
 radiolog pick --today --search queen
+radiolog pick --all                # choose from the whole history
 ```
 ```
   #11  2026-10-19 01:22:16  Proletaryat — Hej naprzód marsz
@@ -202,6 +208,7 @@ radiolog download 3 5 7            # several songs
 radiolog download 10-25            # a range
 radiolog download 3 8-12 20        # mixed
 radiolog download --today          # everything heard today
+radiolog download --all            # every song in your history
 radiolog download --since 3h --video
 radiolog download --search queen -y   # -y: don't ask for confirmation
 ```
@@ -289,6 +296,7 @@ YouTube's terms in your country.
 Put songs from your history into playlists in your Spotify account:
 
 ```
+radiolog playlist --all                            # every song in your history ("radiolog · All songs")
 radiolog playlist --today                          # today's songs
 radiolog playlist 3 5 8-12 --name "Road trip"      # chosen songs
 radiolog playlist --genre rock --name "Radio rock" # all rock songs
