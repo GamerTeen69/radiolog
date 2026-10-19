@@ -23,10 +23,13 @@ Browse the history:
      python radiolog.py show --search queen
      python radiolog.py show --today --csv today.csv
 
-Data is stored in ~/.radiolog.db (override with the RADIOLOG_DB environment variable).
+On first start radiolog asks where to store the database. Change it later with
+    radiolog config --db NEW_LOCATION
+(or override per run with the RADIOLOG_DB environment variable).
 """
 import argparse
 import csv
+import json
 import os
 import platform
 import re
@@ -41,14 +44,193 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
-DB_PATH = Path(os.environ.get("RADIOLOG_DB", str(Path.home() / ".radiolog.db")))
+IS_WIN = sys.platform == "win32"
+DEFAULT_DB = Path.home() / ".radiolog.db"   # default: in the user folder (no admin rights needed)
+DB_PATH = None                              # set by resolve_db_path() at startup
 USER_AGENT = "radiolog/1.0"
 WIN_PKGS = "winrt-runtime winrt-Windows.Media.Control winrt-Windows.Foundation winrt-Windows.Foundation.Collections winrt-Windows.Storage.Streams"
+
+
+# --------------------------------------------------------------------------- database location
+
+def config_file():
+    """Settings file, kept in a per-user folder that never needs admin rights."""
+    if IS_WIN:
+        base = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    return base / "radiolog" / "config.json"
+
+
+def load_config():
+    try:
+        return json.loads(config_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_config(cfg):
+    path = config_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def is_admin():
+    try:
+        if IS_WIN:
+            import ctypes
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        return os.geteuid() == 0
+    except Exception:
+        return False
+
+
+def admin_words():
+    if IS_WIN:
+        return ("administrator rights",
+                "run radiolog from a terminal opened with \"Run as administrator\"")
+    return ("root rights", "run radiolog with sudo")
+
+
+def normalize_db_input(text):
+    """User input (folder or file, maybe quoted, may contain ~ or %VARS%) -> absolute db file path."""
+    text = text.strip().strip('"').strip("'").strip()
+    path = Path(os.path.expandvars(os.path.expanduser(text)))
+    if path.is_dir() or text.endswith(("/", "\\")) or not path.suffix:
+        path = path / "radiolog.db"
+    return path.resolve()
+
+
+def check_writable(db_path):
+    """Can this user create/update the database here? Returns (ok, error)."""
+    folder = db_path.parent
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        probe = folder / f".radiolog-write-test-{os.getpid()}"
+        probe.write_bytes(b"")      # SQLite also needs to create temp files next to the db
+        probe.unlink()
+        if db_path.exists():
+            with open(db_path, "ab"):
+                pass
+        return True, None
+    except OSError as e:
+        return False, e
+
+
+def ask(prompt, default=""):
+    try:
+        answer = input(prompt).strip()
+    except EOFError:
+        answer = ""
+    return answer or default
+
+
+def count_songs(db_path):
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        n = con.execute("SELECT COUNT(*) FROM plays").fetchone()[0]
+        con.close()
+        return n
+    except sqlite3.Error:
+        return 0
+
+
+def choose_db_location(default):
+    """Interactive: ask for a location until it's usable (or the user accepts needing elevation).
+    Returns (path, needs_elevation)."""
+    need, how = admin_words()
+    examples = ("your user folder, Documents, or another drive such as D:\\Music\\radiolog"
+                if IS_WIN else "your home folder, e.g. ~/Music/radiolog")
+    protected = ("C:\\Program Files, C:\\Windows or the root of C:\\"
+                 if IS_WIN else "/usr, /opt, /var or /etc")
+    print(
+        "Where should radiolog store your song history (the database file)?\n\n"
+        f"  Choose a location you can write to WITHOUT {need}, like\n"
+        f"  {examples}.\n\n"
+        f"  Locations such as {protected} need {need}.\n"
+        f"  If you pick one of those, you will have to {how}\n"
+        "  EVERY time you use it.\n\n"
+        "  Enter a folder or a full file path, or press Enter for the default\n"
+        "  (your user folder).\n"
+    )
+    while True:
+        db_path = normalize_db_input(ask(f"Database location [{default}]: ", str(default)))
+        ok, err = check_writable(db_path)
+        if ok:
+            if is_admin():
+                print(f"\n  Note: this terminal has {need}, so I can't tell whether the location\n"
+                      f"  needs them. If it does, you'll have to {how} every time.")
+            return db_path, False
+        print(f"\n✖ radiolog can't write to {db_path.parent}\n  ({err.strerror or err})\n"
+              f"  This location needs {need}.\n\n"
+              "  [1] choose a different location (recommended)\n"
+              f"  [2] keep it: I'll {how} every time\n")
+        if ask("Your choice [1]: ", "1") == "2":
+            return db_path, True
+        print()
+
+
+def offer_move(old, new):
+    """Move an existing history file to the newly chosen place (asks first)."""
+    if not old.exists() or old.resolve() == new.resolve() or new.exists():
+        return
+    n = count_songs(old)
+    if ask(f"Move your existing history ({n} songs) from {old} there? [Y/n]: ", "y").lower() \
+            not in ("y", "yes", "t", "tak"):
+        print(f"  Left it where it was: {old}")
+        return
+    try:
+        new.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(old), str(new))
+        print(f"  Moved ✔")
+    except OSError as e:
+        print(f"  Couldn't move it ({e}). Your old history stays at {old}")
+
+
+def first_run_setup():
+    print("\n── radiolog first-time setup ───────────────────────────\n")
+    default = DEFAULT_DB
+    if DEFAULT_DB.exists():
+        print(f"Found your existing history at {DEFAULT_DB} ({count_songs(DEFAULT_DB)} songs).\n"
+              "Press Enter to keep using it, or choose a new place to move it to.\n")
+    db_path, needs_elevation = choose_db_location(default)
+    offer_move(DEFAULT_DB, db_path)
+    save_config({"db_path": str(db_path)})
+    print(f"\n✔ Saved. Your song history will be stored in:\n  {db_path}\n"
+          f"  (change it any time with:  radiolog config --db NEW_LOCATION)\n")
+    if needs_elevation:
+        _, how = admin_words()
+        raise SystemExit(f"This location needs elevated rights, so {how} from now on.")
+    print("─" * 56 + "\n")
+    return db_path
+
+
+def resolve_db_path():
+    """RADIOLOG_DB env variable > saved setting > first-run question (> legacy default)."""
+    if os.environ.get("RADIOLOG_DB"):
+        return Path(os.environ["RADIOLOG_DB"]).expanduser().resolve()
+    saved = load_config().get("db_path")
+    if saved:
+        return Path(saved)
+    if sys.stdin.isatty():
+        return first_run_setup()
+    return DEFAULT_DB       # no one to ask (e.g. started by a script): use the default, ask later
 
 
 # --------------------------------------------------------------------------- storage
 
 def db_connect():
+    ok, err = check_writable(DB_PATH)
+    if not ok:
+        need, how = admin_words()
+        raise SystemExit(
+            f"radiolog can't write to its database at:\n  {DB_PATH}\n  ({err.strerror or err})\n\n"
+            f"This location needs {need}. Either {how},\n"
+            "or move the history somewhere you can write to:\n"
+            "  radiolog config --db NEW_LOCATION"
+        )
     con = sqlite3.connect(DB_PATH)
     con.execute(
         """CREATE TABLE IF NOT EXISTS plays (
@@ -396,6 +578,44 @@ def cmd_show(args):
     print(f"\n{len(rows)} song(s)")
 
 
+# --------------------------------------------------------------------------- config
+
+def cmd_config(args):
+    if args.reset:
+        try:
+            config_file().unlink()
+        except FileNotFoundError:
+            pass
+        print("Setting cleared. radiolog will ask where to store the database next time it starts.\n"
+              "(Your existing history file was not touched.)")
+        return
+
+    current = Path(load_config().get("db_path") or DEFAULT_DB)
+    if args.db:
+        new = normalize_db_input(args.db)
+        ok, err = check_writable(new)
+        if not ok:
+            need, how = admin_words()
+            print(f"✖ radiolog can't write to {new.parent} ({err.strerror or err}).\n"
+                  f"  This location needs {need}; you'd have to {how} every time.")
+            if ask("Use it anyway? [y/N]: ", "n").lower() not in ("y", "yes", "t", "tak"):
+                print("Nothing changed.")
+                return
+        offer_move(current, new)
+        save_config({"db_path": str(new)})
+        print(f"✔ Song history location set to:\n  {new}")
+        return
+
+    need, how = admin_words()
+    ok, _ = check_writable(current)
+    print(f"Database:      {current}")
+    print("Songs logged:  " + (str(count_songs(current)) if current.exists() else "0 (file not created yet)"))
+    print("Writable:      " + ("yes" if ok else f"NO (needs {need}; {how})"))
+    print(f"Settings file: {config_file()}")
+    if os.environ.get("RADIOLOG_DB"):
+        print(f"Note: RADIOLOG_DB is set, so {os.environ['RADIOLOG_DB']} is used instead.")
+
+
 # --------------------------------------------------------------------------- main
 
 def main():
@@ -421,6 +641,10 @@ def main():
     s.add_argument("--csv", metavar="FILE", help="export the selection to a CSV file instead of printing")
     s.add_argument("--no-source", action="store_true", help="hide the station/player column")
 
+    c = sub.add_parser("config", help="show or change where the song history is stored")
+    c.add_argument("--db", metavar="LOCATION", help="new folder or file for the database (history is moved)")
+    c.add_argument("--reset", action="store_true", help="forget the setting; ask again on next start")
+
     args = p.parse_args()
 
     if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
@@ -429,7 +653,12 @@ def main():
         except AttributeError:
             pass
 
+    global DB_PATH
     try:
+        if args.cmd == "config":
+            cmd_config(args)
+            return
+        DB_PATH = resolve_db_path()
         if args.cmd == "watch":
             rec = Recorder(db_connect())
             print(f"Saving to {DB_PATH}")

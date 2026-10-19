@@ -185,7 +185,7 @@ def uninstall():
     code, _ = run([sys.executable, "-m", "pip", "uninstall", "-y", "radiolog"])
     if code != 0:
         run(["pipx", "uninstall", "radiolog"])
-    say("\n✔ radiolog removed. Your song history (~/.radiolog.db) was kept.")
+    say("\n✔ radiolog removed. Your song history was kept.")
 
 
 if __name__ == "__main__":

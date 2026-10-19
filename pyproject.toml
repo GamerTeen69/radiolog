@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "radiolog"
-version = "1.0.1"
+version = "1.1.0"
 description = "Log every song played on your PC — made for internet radio, works with any player"
 requires-python = ">=3.8"
 

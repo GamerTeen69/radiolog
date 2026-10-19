@@ -89,13 +89,31 @@ radiolog show --today --csv today.csv            # export to a spreadsheet
 
 ## Where the data lives
 
-All songs are stored in a single SQLite file:
+All songs are stored in a single SQLite database file. **The first time you start radiolog, it asks
+where to keep it.** Press Enter to use the default location in your user folder:
 
 - Windows: `C:\Users\<you>\.radiolog.db`
 - Linux / macOS: `~/.radiolog.db`
 
-Set the `RADIOLOG_DB` environment variable to use a different location.
-Uninstalling radiolog keeps this file.
+You can also type any folder (for example `D:\Music\radiolog`) or a full file path.
+
+> ⚠️ **Choose a location you can write to without administrator rights**, such as your user folder,
+> Documents or another drive. Folders like `C:\Program Files`, `C:\Windows` or the root of `C:\`
+> (on Linux: `/usr`, `/opt`, `/etc`) need administrator rights. If you choose one of those, radiolog
+> must be run **elevated every time**: from a terminal opened with *Run as administrator*
+> (Linux/macOS: with `sudo`). radiolog checks the location and warns you before saving it.
+
+Change the location later (your existing history is moved for you):
+
+```
+radiolog config                       # show where the history is and whether it's writable
+radiolog config --db D:\Music\radiolog  # move it somewhere else
+radiolog config --reset               # ask again on next start
+```
+
+The setting itself is saved in `%APPDATA%\radiolog\config.json` (Linux: `~/.config/radiolog/`,
+macOS: `~/Library/Application Support/radiolog/`). For a one-off override, set the `RADIOLOG_DB`
+environment variable. Uninstalling radiolog keeps your history.
 
 ## Troubleshooting
 
@@ -115,6 +133,10 @@ you play in the browser, use `radiolog watch --system`, or find the station's di
 station's stream URL instead.
 
 **"A Windows component is missing"**: run `install.bat` again.
+
+**"radiolog can't write to its database"**: the database is in a location that needs administrator
+rights. Run radiolog from a terminal opened with *Run as administrator*, or move the history
+somewhere you can write to with `radiolog config --db NEW_LOCATION`.
 
 ## Update / Uninstall
 
