@@ -175,6 +175,55 @@ def choose_db_location(default):
         print()
 
 
+DEFAULT_DOWNLOADS = Path.home() / "Music" / "radiolog"
+
+
+def normalize_folder_input(text):
+    text = text.strip().strip('"').strip("'").strip()
+    return Path(os.path.expandvars(os.path.expanduser(text))).resolve()
+
+
+def choose_download_location(default):
+    """Interactive: ask where downloaded songs go. Returns (folder, needs_elevation)."""
+    need, how = admin_words()
+    example = "D:\\Music" if IS_WIN else "~/Music"
+    print(
+        "Where should downloaded songs be saved?\n\n"
+        f"  Choose a folder you can write to WITHOUT {need}, e.g. your Music folder\n"
+        f"  or another drive ({example}). The folder is created if it doesn't exist.\n"
+        "  Press Enter for the default (Music\\radiolog in your user folder).\n"
+        if IS_WIN else
+        "Where should downloaded songs be saved?\n\n"
+        f"  Choose a folder you can write to WITHOUT {need}, e.g. {example}.\n"
+        "  The folder is created if it doesn't exist.\n"
+        "  Press Enter for the default (~/Music/radiolog).\n"
+    )
+    while True:
+        folder = normalize_folder_input(ask(f"Download folder [{default}]: ", str(default)))
+        ok, err = check_writable(folder / "radiolog-probe")
+        if ok:
+            return folder, False
+        print(f"\n✖ radiolog can't write to {folder}\n  ({err.strerror or err})\n"
+              f"  This folder needs {need}.\n\n"
+              "  [1] choose a different folder (recommended)\n"
+              f"  [2] keep it: I'll {how} every time I download\n")
+        if ask("Your choice [1]: ", "1") == "2":
+            return folder, True
+        print()
+
+
+def ask_download_location():
+    """Ask once and save. Returns the chosen folder."""
+    folder, needs_elevation = choose_download_location(DEFAULT_DOWNLOADS)
+    save_config({"download_dir": str(folder)})
+    print(f"\n✔ Downloads will be saved in:\n  {folder}\n"
+          "  (change it any time with:  radiolog config --downloads FOLDER)")
+    if needs_elevation:
+        _, how = admin_words()
+        print(f"  This folder needs elevated rights, so {how} when downloading.")
+    return folder
+
+
 def offer_move(old, new):
     """Move an existing history file to the newly chosen place (asks first)."""
     if not old.exists() or old.resolve() == new.resolve() or new.exists():
@@ -198,14 +247,19 @@ def first_run_setup():
     if DEFAULT_DB.exists():
         print(f"Found your existing history at {DEFAULT_DB} ({count_songs(DEFAULT_DB)} songs).\n"
               "Press Enter to keep using it, or choose a new place to move it to.\n")
+    print("Step 1 of 2: song history\n")
     db_path, needs_elevation = choose_db_location(default)
     offer_move(DEFAULT_DB, db_path)
     save_config({"db_path": str(db_path)})
-    print(f"\n✔ Saved. Your song history will be stored in:\n  {db_path}\n"
+    print(f"\n✔ Your song history will be stored in:\n  {db_path}\n"
           f"  (change it any time with:  radiolog config --db NEW_LOCATION)\n")
+
+    print("Step 2 of 2: downloads\n")
+    ask_download_location()
+    print()
     if needs_elevation:
         _, how = admin_words()
-        raise SystemExit(f"This location needs elevated rights, so {how} from now on.")
+        raise SystemExit(f"Your song history location needs elevated rights, so {how} from now on.")
     print("─" * 56 + "\n")
     return db_path
 
@@ -636,7 +690,19 @@ def open_search(service, artist, title):
 
 def default_download_dir():
     saved = load_config().get("download_dir")
-    return Path(saved) if saved else Path.home() / "Music" / "radiolog"
+    return Path(saved) if saved else DEFAULT_DOWNLOADS
+
+
+def download_dir(folder=None, ask_if_unset=True):
+    """--dir if given, else the saved folder; asks once if it was never chosen."""
+    if folder:
+        return Path(folder).expanduser()
+    if ask_if_unset and not load_config().get("download_dir") and sys.stdin.isatty():
+        print("\n── First download: choose a folder ─────────────────────\n")
+        chosen = ask_download_location()
+        print("─" * 56 + "\n")
+        return chosen
+    return default_download_dir()
 
 
 def safe_filename(text):
@@ -715,7 +781,7 @@ def ffmpeg_note(video):
 def download_song(artist, title, folder=None, video=False, print_only=False, quiet_header=False,
                   force=False):
     """Download one song. Returns 'ok', 'skipped', 'failed' or 'missing' (yt-dlp not installed)."""
-    folder = Path(folder).expanduser() if folder else default_download_dir()
+    folder = download_dir(folder, ask_if_unset=not print_only)
     have_ffmpeg = bool(shutil.which("ffmpeg"))
     cmd = build_ytdlp_cmd(artist, title, folder, video, have_ffmpeg)
     base = ytdlp_base()
@@ -805,7 +871,7 @@ def batch_download(songs, folder=None, video=False, print_only=False, confirm=Tr
         download_song(artist, title, folder, video, print_only, force=force)
         return
 
-    folder = Path(folder).expanduser() if folder else default_download_dir()
+    folder = download_dir(folder, ask_if_unset=not print_only)
     if print_only:
         for _, artist, title in songs:
             download_song(artist, title, folder, video, print_only=True)
@@ -946,7 +1012,15 @@ def cmd_config(args):
         return
 
     if args.downloads:
-        folder = Path(os.path.expandvars(os.path.expanduser(args.downloads.strip().strip('"')))).resolve()
+        folder = normalize_folder_input(args.downloads)
+        ok, err = check_writable(folder / "radiolog-probe")
+        if not ok:
+            need, how = admin_words()
+            print(f"✖ radiolog can't write to {folder} ({err.strerror or err}).\n"
+                  f"  This folder needs {need}; you'd have to {how} when downloading.")
+            if ask("Use it anyway? [y/N]: ", "n").lower() not in ("y", "yes", "t", "tak"):
+                print("Nothing changed.")
+                return
         save_config({"download_dir": str(folder)})
         print(f"✔ Downloads will be saved in:\n  {folder}")
         if not args.db:

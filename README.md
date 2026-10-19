@@ -145,8 +145,10 @@ downloaded once, and songs already in your download folder are skipped (use `--f
 them again). At the end you get a summary of what was downloaded, skipped or failed.
 Ctrl+C stops after the current song.
 
-Downloads go to `Music\radiolog` in your user folder. Change it with
-`radiolog config --downloads D:\Music`.
+Downloads go to the folder you chose during the first-time setup (default: `Music\radiolog` in
+your user folder). If you set radiolog up before this option existed, it asks once before your
+first download. As with the database, pick a folder you can write to without administrator rights.
+Change it any time with `radiolog config --downloads D:\Music`, or use `--dir` for a single download.
 
 **What "best quality" means here:** yt-dlp takes the best audio stream YouTube offers and saves it
 **without re-encoding** (usually `.opus` or `.m4a`), so no quality is lost, and adds tags and cover
@@ -160,7 +162,7 @@ YouTube's terms in your country.
 ## Where the data lives
 
 All songs are stored in a single SQLite database file. **The first time you start radiolog, it asks
-where to keep it.** Press Enter to use the default location in your user folder:
+where to keep it**, and then where to save downloaded songs. Press Enter to use the default location in your user folder:
 
 - Windows: `C:\Users\<you>\.radiolog.db`
 - Linux / macOS: `~/.radiolog.db`
