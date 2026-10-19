@@ -44,6 +44,7 @@ Watching the system media session every 5s   (Ctrl+C to stop)
   Prefer **MP3** or **M4A** for older devices? Set it once with `radiolog config --format`.
   **Batch download** whole ranges, a day's listening or search results, with no duplicates.
 - **CSV export** that opens cleanly in Excel.
+- **Updates itself**: `radiolog update` installs the newest release from GitHub.
 - **Clear the history** completely or partly (chosen songs, older than N days, matching text),
   with a confirmation and an automatic backup.
 - **Handles Polish and other non-English titles**, including stations that send
@@ -346,14 +347,22 @@ see `radiolog config`) over the database file.
 **The download is the wrong song**: radiolog uses the first YouTube result for *Artist - Title*.
 Check with `radiolog search NUMBER` first, or download that video yourself with yt-dlp.
 
+**`radiolog update` fails**: download the newest release from the
+[releases page](https://github.com/GamerTeen69/radiolog/releases), unzip it and run the installer.
+That always works and keeps your history and settings.
+
 **"radiolog can't write to its database"**: the database is in a location that needs administrator
 rights. Run radiolog from a terminal opened with *Run as administrator*, or move the history
 somewhere you can write to with `radiolog config --db NEW_LOCATION`.
 
 ## Update / Uninstall
 
-- **Update:** download the latest version from GitHub (*Code → Download ZIP*), unzip it over the
-  old folder and run the installer again. Your history, downloads and settings are kept.
+- **Update:** run `radiolog update`. It checks GitHub for a newer release, shows what's new and
+  installs it after you confirm. `radiolog update --check` only checks, and `radiolog --version`
+  shows your version. On Windows the update finishes in a new window, because a running program
+  can't replace itself. Your history, downloads and settings are kept.
+  (Versions before 1.7 don't have this command yet: download the latest release, unzip it and run
+  the installer once.)
 - **Uninstall:** double-click `uninstall.bat` (Windows) or run `./install.sh --uninstall`.
 
 ## Releases (for maintainers)

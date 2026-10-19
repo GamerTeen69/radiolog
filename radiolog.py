@@ -45,6 +45,11 @@ Settings
     Settings live in %APPDATA%\\radiolog\\config.json (Linux: ~/.config/radiolog/).
     The RADIOLOG_DB environment variable overrides the history location for one run.
 
+Update
+    radiolog update                      install the newest release from GitHub (shows what's new)
+    radiolog update --check              only check
+    radiolog --version                   show the installed version
+
 Run  radiolog COMMAND --help  for all options of a command.
 """
 import argparse
@@ -68,7 +73,21 @@ from urllib.parse import quote, quote_plus, urljoin, urlsplit
 IS_WIN = sys.platform == "win32"
 DEFAULT_DB = Path.home() / ".radiolog.db"   # default: in the user folder (no admin rights needed)
 DB_PATH = None                              # set by resolve_db_path() at startup
-USER_AGENT = "radiolog/1.0"
+GITHUB_REPO = "GamerTeen69/radiolog"
+
+
+def installed_version():
+    try:
+        from importlib.metadata import version, PackageNotFoundError
+        try:
+            return version("radiolog")
+        except PackageNotFoundError:
+            return None
+    except ImportError:
+        return None
+
+
+USER_AGENT = f"radiolog/{installed_version() or 'dev'}"
 WIN_PKGS = "winrt-runtime winrt-Windows.Media.Control winrt-Windows.Foundation winrt-Windows.Foundation.Collections winrt-Windows.Storage.Streams"
 
 
@@ -1187,6 +1206,129 @@ def cmd_clear(args):
               "  (to undo: close radiolog and copy the backup over the database file)")
 
 
+# --------------------------------------------------------------------------- update
+
+def version_tuple(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v or "")[:3]) or (0,)
+
+
+def latest_release():
+    """The newest published release on GitHub: dict with tag_name, name, body, html_url."""
+    import urllib.request
+    req = urllib.request.Request(
+        f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+        headers={"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except Exception as e:
+        raise SystemExit(f"Couldn't reach GitHub to check for updates ({e}).\n"
+                         f"Check your internet connection, or see https://github.com/{GITHUB_REPO}/releases")
+
+
+def install_method():
+    """How this copy was installed: 'pipx', 'venv' or 'user'."""
+    prefix = sys.prefix.replace("\\", "/").lower()
+    if "/pipx/venvs/" in prefix:
+        return "pipx"
+    if sys.prefix != getattr(sys, "base_prefix", sys.prefix):
+        return "venv"
+    return "user"
+
+
+def update_command(tag):
+    url = f"https://github.com/{GITHUB_REPO}/archive/refs/tags/{tag}.zip"
+    method = install_method()
+    if method == "pipx":
+        return ["pipx", "install", "--force", url]
+    spec = f"radiolog[windows] @ {url}" if IS_WIN else f"radiolog @ {url}"
+    cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "--disable-pip-version-check",
+           "--no-warn-script-location"]
+    if method == "user":
+        cmd.append("--user")
+    return cmd + [spec]
+
+
+def run_update_windows(cmd, version):
+    """radiolog.exe can't replace itself while running, so the update runs in a new window
+    right after this program exits."""
+    import tempfile
+    bat = Path(tempfile.gettempdir()) / "radiolog-update.bat"
+    bat.write_text(
+        "@echo off\r\n"
+        f"echo Updating radiolog to {version}...\r\n"
+        "timeout /t 2 /nobreak >nul\r\n"
+        + subprocess.list2cmdline(cmd) + "\r\n"
+        "if errorlevel 1 (\r\n"
+        "  echo.\r\n"
+        "  echo Update failed. See the messages above, or run install.bat from the new release.\r\n"
+        ") else (\r\n"
+        "  echo.\r\n"
+        f"  echo radiolog {version} is installed. Close this window and open a new terminal.\r\n"
+        ")\r\n"
+        "pause\r\n", encoding="utf-8")
+    subprocess.Popen(["cmd", "/c", str(bat)], creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0x10))
+    print("The update continues in a new window. radiolog closes now so it can be replaced.")
+
+
+def cmd_update(args):
+    current = installed_version()
+    print("Checking GitHub for updates…")
+    rel = latest_release()
+    tag = rel.get("tag_name", "")
+    latest = tag.lstrip("v")
+    print(f"Installed: {current or 'unknown (running from the source folder)'}")
+    print(f"Latest:    {latest}   {rel.get('html_url', '')}")
+
+    if current and version_tuple(latest) <= version_tuple(current) and not args.force:
+        print("\n✔ You already have the latest version.")
+        return
+    if not current:
+        print("\nThis copy isn't installed with the installer, so it can't update itself.\n"
+              "Download the latest release and run install.bat (Windows) or ./install.sh.")
+        return
+
+    notes = []
+    for line in (rel.get("body") or "").strip().splitlines():
+        if line.startswith("## Install"):
+            break                       # install steps don't matter when updating
+        if line.startswith("```"):
+            continue
+        line = re.sub(r"^#+\s*", "", line)                          # headings
+        line = re.sub(r"\*\*(.+?)\*\*|`(.+?)`", lambda m: m.group(1) or m.group(2), line)
+        line = re.sub(r"\[(.+?)\]\((.+?)\)", r"\1 (\2)", line)       # links
+        if line.strip() or (notes and notes[-1].strip()):
+            notes.append(line)
+    while notes and not notes[-1].strip():
+        notes.pop()
+    if notes:
+        print(f"\n── What's new in {latest} " + "─" * 30)
+        for line in notes[:25]:
+            print("  " + line)
+        if len(notes) > 25:
+            print(f"  … more at {rel.get('html_url', '')}")
+        print("─" * 50)
+    if args.check:
+        print(f"\nUpdate with:  radiolog update")
+        return
+
+    cmd = update_command(tag)
+    if not args.yes and sys.stdin.isatty():
+        if ask(f"\nUpdate radiolog to {latest} now? [Y/n]: ", "y").lower() not in ("y", "yes", "t", "tak"):
+            print("Not updated.")
+            return
+    print("\nYour song history, downloads and settings are kept.")
+    if IS_WIN and install_method() != "pipx":
+        run_update_windows(cmd, latest)
+        return
+    print("Running: " + show_cmd(cmd) + "\n")
+    code = subprocess.call(cmd)
+    if code == 0:
+        print(f"\n✔ radiolog {latest} is installed.")
+    else:
+        print("\n✖ The update failed (see above). You can always download the release and run the installer.")
+
+
 # --------------------------------------------------------------------------- config
 
 def cmd_config(args):
@@ -1375,6 +1517,23 @@ def main():
     add_filters(k)
     k.add_argument("--dir", help="save downloads into this folder this time (setting unchanged)")
 
+    u = sub.add_parser(
+        "update", help="update radiolog to the newest release from GitHub",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Check GitHub for a newer radiolog release, show what's new, and install it.\n"
+            "Your song history, downloads and settings are kept.\n\n"
+            "On Windows the update runs in a new window a moment after radiolog closes,\n"
+            "because a running program can't replace itself."),
+        epilog=(
+            "examples:\n"
+            "  radiolog update             check, show what's new, ask, then update\n"
+            "  radiolog update --check     only check for a new version\n"
+            "  radiolog update -y          update without asking"))
+    u.add_argument("--check", action="store_true", help="only check whether a new version exists")
+    u.add_argument("-y", "--yes", action="store_true", help="don't ask before updating")
+    u.add_argument("--force", action="store_true", help="reinstall even if you have the latest version")
+
     x = sub.add_parser(
         "clear", help="delete songs from the history (all, chosen numbers, or a time range)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1451,6 +1610,8 @@ def main():
     d.add_argument("--format", choices=list(AUDIO_FORMATS),
                    help="audio format for this download (default: your setting, see radiolog config)")
 
+    p.add_argument("--version", action="version",
+                   version=f"radiolog {installed_version() or 'dev (not installed)'}")
     args = p.parse_args()
 
     if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
@@ -1463,6 +1624,9 @@ def main():
     try:
         if args.cmd == "config":
             cmd_config(args)
+            return
+        if args.cmd == "update":
+            cmd_update(args)
             return
         DB_PATH = resolve_db_path()
         if args.cmd == "clear":
