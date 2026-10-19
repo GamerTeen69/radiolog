@@ -361,7 +361,7 @@ somewhere you can write to with `radiolog config --db NEW_LOCATION`.
   installs it after you confirm. `radiolog update --check` only checks, and `radiolog --version`
   shows your version. On Windows the update finishes in a new window, because a running program
   can't replace itself. Your history, downloads and settings are kept.
-  (Versions before 1.7 don't have this command yet: download the latest release, unzip it and run
+  (Versions before 1.6.1 don't have this command yet: download the latest release, unzip it and run
   the installer once.)
 - **Uninstall:** double-click `uninstall.bat` (Windows) or run `./install.sh --uninstall`.
 
