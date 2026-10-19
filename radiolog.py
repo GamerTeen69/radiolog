@@ -33,6 +33,7 @@ Settings
     radiolog config                      show where the history and downloads are
     radiolog config --db LOCATION        move the song history (folder or file path)
     radiolog config --downloads FOLDER   change the download folder
+    radiolog config --format mp3         download audio as best | opus | m4a | mp3
     radiolog config --reset              forget both settings; setup runs again on next start
     Settings live in %APPDATA%\\radiolog\\config.json (Linux: ~/.config/radiolog/).
     The RADIOLOG_DB environment variable overrides the history location for one run.
@@ -734,8 +735,30 @@ def ytdlp_base():
     return None
 
 
-def build_ytdlp_cmd(artist, title, folder, video=False, have_ffmpeg=True):
+AUDIO_FORMATS = {
+    "best": "the original YouTube stream, no conversion (usually .opus, best quality)",
+    "opus": ".opus, YouTube's Opus stream as-is (same as best in most cases)",
+    "m4a":  ".m4a (AAC), YouTube's AAC stream as-is; plays on Apple devices",
+    "mp3":  ".mp3, converted at the highest MP3 quality; plays everywhere, slightly lower quality",
+}
+FORMAT_OVERRIDE = None          # set by 'download --format' for one run
+
+
+def audio_format():
+    fmt = FORMAT_OVERRIDE or load_config().get("audio_format") or "best"
+    return fmt if fmt in AUDIO_FORMATS else "best"
+
+
+def format_exts(fmt, video=False):
+    """File extensions a finished download in this format can have (None = any)."""
+    if video or fmt == "best":
+        return None
+    return {"opus": {".opus", ".webm", ".ogg"}, "m4a": {".m4a"}, "mp3": {".mp3"}}[fmt]
+
+
+def build_ytdlp_cmd(artist, title, folder, video=False, have_ffmpeg=True, fmt=None):
     """yt-dlp command that finds the song on YouTube and downloads the best quality available."""
+    fmt = fmt or audio_format()
     name = output_name(artist, title, video)
     cmd = ["--no-playlist", "--paths", str(folder), "-o", f"{name}.%(ext)s"]
     if video and have_ffmpeg:
@@ -743,11 +766,23 @@ def build_ytdlp_cmd(artist, title, folder, video=False, have_ffmpeg=True):
         cmd += ["-f", "bv*+ba/b", "--merge-output-format", "mkv"]
     elif video:
         cmd += ["-f", "b"]          # best file that already has video and audio together
+    elif fmt == "mp3" and have_ffmpeg:
+        # YouTube has no MP3: take the best stream and convert at the top MP3 quality (VBR V0)
+        cmd += ["-f", "ba/b", "-x", "--audio-format", "mp3", "--audio-quality", "0"]
+    elif fmt == "m4a":
+        # prefer YouTube's own AAC stream so nothing is re-encoded
+        cmd += ["-f", "ba[ext=m4a]/ba/b"]
+        if have_ffmpeg:
+            cmd += ["-x", "--audio-format", "m4a", "--audio-quality", "0"]
+    elif fmt == "opus":
+        cmd += ["-f", "ba[acodec=opus]/ba/b"]
+        if have_ffmpeg:
+            cmd += ["-x", "--audio-format", "opus", "--audio-quality", "0"]
     elif have_ffmpeg:
         # best audio stream, extracted WITHOUT re-encoding (keeps the original quality: opus/m4a)
         cmd += ["-f", "ba/b", "-x", "--audio-quality", "0"]
     else:
-        cmd += ["-f", "ba/b"]
+        cmd += ["-f", "ba/b"]       # (also mp3 without ffmpeg: can't convert, keep the original)
     if have_ffmpeg:
         cmd += ["--embed-metadata", "--embed-thumbnail"]
     cmd.append("ytsearch1:" + song_query(artist, title).replace('"', ""))
@@ -767,12 +802,15 @@ def output_name(artist, title, video=False):
 
 
 def already_downloaded(folder, artist, title, video):
-    """Finished file for this song in the folder (ignores yt-dlp's unfinished .part files)."""
+    """Finished file for this song in the folder, in the chosen format (ignores unfinished .part files)."""
     name = output_name(artist, title, video)
+    wanted = format_exts(audio_format(), video)
     if not folder.is_dir():
         return None
     for f in folder.iterdir():
-        if f.is_file() and f.stem == name and f.suffix.lower() not in (".part", ".ytdl", ".temp"):
+        ext = f.suffix.lower()
+        if f.is_file() and f.stem == name and ext not in (".part", ".ytdl", ".temp") \
+                and (wanted is None or ext in wanted):
             return f
     return None
 
@@ -786,6 +824,8 @@ def ffmpeg_note(video):
     print("Note: ffmpeg was not found, so files are saved exactly as YouTube streams them\n"
           "      (still the best quality, but without cover art/tags" +
           (", and video without merging)." if video else ")."))
+    if not video and audio_format() == "mp3":
+        print("      MP3 needs ffmpeg for converting, so you'll get the original format instead.")
     print("      Install it for the full result:  " +
           ("winget install Gyan.FFmpeg" if IS_WIN else "sudo apt install ffmpeg") + "\n")
 
@@ -813,7 +853,8 @@ def download_song(artist, title, folder=None, video=False, print_only=False, qui
         ffmpeg_note(video)
 
     folder.mkdir(parents=True, exist_ok=True)
-    print(f"Downloading: {song_query(artist, title)}   ({'video' if video else 'audio'}, best quality)")
+    kind = "video" if video else ("audio" if audio_format() == "best" else audio_format())
+    print(f"Downloading: {song_query(artist, title)}   ({kind}, best quality)")
     if not quiet_header:
         print(f"Into:        {folder}")
         print(f"Command:     {show_cmd(['yt-dlp'] + cmd)}\n")
@@ -892,7 +933,7 @@ def batch_download(songs, folder=None, video=False, print_only=False, confirm=Tr
         print(YTDLP_MISSING)
         return
 
-    kind = "video" if video else "audio"
+    kind = "video" if video else ("audio" if audio_format() == "best" else audio_format())
     print(f"\nBatch download: {len(songs)} songs ({kind}, best quality)\nInto: {folder}\n")
     for _, artist, title in songs[:10]:
         print(f"  • {song_query(artist, title)}")
@@ -935,6 +976,8 @@ def has_filters(args):
 
 
 def cmd_download(args):
+    global FORMAT_OVERRIDE
+    FORMAT_OVERRIDE = args.format
     if args.songs and has_filters(args):
         raise SystemExit("Use either song numbers or filters (--today, --since, --search…), not both.")
     if has_filters(args):
@@ -973,7 +1016,7 @@ def cmd_pick(args):
                 song_id, artist, title = songs[0]
                 print(f"\n  ♪ {song_query(artist, title)}\n"
                       "  [y] search on YouTube      [m] YouTube Music     [s] Spotify\n"
-                      "  [d] download audio         [v] download video    [c] show yt-dlp command\n"
+                      f"  [d] download audio ({audio_format():<4})  [v] download video    [c] show yt-dlp command\n"
                       "  [b] back to the list       [q] quit")
                 valid = "ymsdvcbq"
             else:
@@ -983,7 +1026,7 @@ def cmd_pick(args):
                     print(f"     {song_query(artist, title)}")
                 if len(songs) > 5:
                     print(f"     … and {len(songs) - 5} more")
-                print("  [d] download all (audio)   [v] download all (video)   [c] show yt-dlp commands\n"
+                print(f"  [d] download all ({audio_format()})   [v] download all (video)   [c] show yt-dlp commands\n"
                       "  [b] back to the list       [q] quit")
                 valid = "dvcbq"
 
@@ -1023,6 +1066,16 @@ def cmd_config(args):
               "(Your existing history file was not touched.)")
         return
 
+    if args.format:
+        save_config({"audio_format": args.format})
+        print(f"✔ Downloads will be saved as: {args.format}  ({AUDIO_FORMATS[args.format]})")
+        if args.format != "best" and not shutil.which("ffmpeg"):
+            print("  Note: ffmpeg is needed for " + ("converting to MP3" if args.format == "mp3"
+                  else "clean files with cover art") + ". Install it:  " +
+                  ("winget install Gyan.FFmpeg" if IS_WIN else "sudo apt install ffmpeg"))
+        if not (args.downloads or args.db):
+            return
+
     if args.downloads:
         folder = normalize_folder_input(args.downloads)
         ok, err = check_writable(folder / "radiolog-probe")
@@ -1060,6 +1113,7 @@ def cmd_config(args):
     print("Songs logged:  " + (str(count_songs(current)) if current.exists() else "0 (file not created yet)"))
     print("Writable:      " + ("yes" if ok else f"NO (needs {need}; {how})"))
     print(f"Downloads:     {default_download_dir()}")
+    print(f"Audio format:  {audio_format()}  ({AUDIO_FORMATS[audio_format()]})")
     print(f"Settings file: {config_file()}")
     if os.environ.get("RADIOLOG_DB"):
         print(f"Note: RADIOLOG_DB is set, so {os.environ['RADIOLOG_DB']} is used instead.")
@@ -1100,9 +1154,12 @@ def main():
         "config", help="show or change where the song history and downloads are stored",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
-            "Show or change radiolog's two settings: where your song history (database) is\n"
-            "stored, and where downloaded songs are saved. Without options, shows the\n"
-            "current settings, how many songs are logged and whether the history is writable.\n\n"
+            "Show or change radiolog's settings: where your song history (database) is\n"
+            "stored, where downloaded songs are saved, and their audio format. Without options,\n"
+            "shows the current settings, how many songs are logged and whether the history\n"
+            "is writable.\n\n"
+            "Audio formats:\n"
+            + "".join(f"  {k:<5} {v}\n" for k, v in AUDIO_FORMATS.items()) + "\n"
             "Choose locations you can write to without administrator rights. Locations that\n"
             "need them are detected and explained; if you keep one anyway, radiolog must be\n"
             "run elevated (Run as administrator / sudo) every time it uses it."),
@@ -1112,6 +1169,7 @@ def main():
             "  radiolog config --db D:\\Music\\radiolog        move the history into that folder\n"
             "  radiolog config --db \"D:\\My Music\\songs.db\"   use a specific file (quote spaces)\n"
             "  radiolog config --downloads D:\\Music          save downloads there from now on\n"
+            "  radiolog config --format mp3                  download songs as .mp3 from now on\n"
             "  radiolog config --reset                       run the first-time setup again\n\n"
             "Settings file: %APPDATA%\\radiolog\\config.json (Linux: ~/.config/radiolog/config.json)."))
     c.add_argument("--db", metavar="LOCATION",
@@ -1121,6 +1179,9 @@ def main():
     c.add_argument("--downloads", metavar="FOLDER",
                    help="save future downloads in this folder (already downloaded files stay "
                         "where they are). Default: Music\\radiolog in your user folder")
+    c.add_argument("--format", choices=list(AUDIO_FORMATS),
+                   help="audio format for downloads: best (default, original stream, usually "
+                        ".opus), opus, m4a (no conversion) or mp3 (converted, plays everywhere)")
     c.add_argument("--reset", action="store_true",
                    help="forget both settings so the first-time setup runs again on the next "
                         "start. Your history and downloaded songs are NOT deleted")
@@ -1154,6 +1215,8 @@ def main():
     d.add_argument("--print-cmd", action="store_true", help="only print the yt-dlp commands, don't run them")
     d.add_argument("-y", "--yes", action="store_true", help="don't ask before a batch download")
     d.add_argument("--force", action="store_true", help="download again even if the file already exists")
+    d.add_argument("--format", choices=list(AUDIO_FORMATS),
+                   help="audio format for this download (default: your setting, see radiolog config)")
 
     args = p.parse_args()
 

@@ -36,6 +36,7 @@ Watching the system media session every 5s   (Ctrl+C to stop)
 - **Find it again**: open any logged song in a YouTube, YouTube Music or Spotify search with one command.
 - **Download in the best quality available** with a ready-made [yt-dlp](https://github.com/yt-dlp/yt-dlp)
   command: best audio stream with no re-encoding, cover art and tags (or the full video).
+  Prefer **MP3** or **M4A** for older devices? Set it once with `radiolog config --format`.
   **Batch download** whole ranges, a day's listening or search results, with no duplicates.
 - **CSV export** that opens cleanly in Excel.
 - **Handles Polish and other non-English titles**, including stations that send
@@ -121,6 +122,7 @@ radiolog search 12 --ytmusic       # YouTube Music
 radiolog search 12 --spotify       # Spotify
 radiolog download 12               # best-quality audio
 radiolog download 12 --video       # best-quality video (saved as "… (video).mkv")
+radiolog download 12 --format mp3  # as .mp3 this time (see Audio formats below)
 radiolog download 12 --print-cmd   # just print the yt-dlp command to copy
 radiolog download 12 --dir D:\Music
 ```
@@ -154,6 +156,32 @@ or use `--dir FOLDER` for a single download.
 art. `--video` takes the best video and best audio streams and joins them into an `.mkv`.
 Without ffmpeg, the file is saved exactly as streamed, still at the best quality, but without
 cover art and tags. The installer offers to install ffmpeg, or run `winget install Gyan.FFmpeg`.
+
+### Audio formats
+
+By default radiolog keeps the audio exactly as YouTube streams it, which is the best quality you can
+get. Choose another format if a device of yours can't play it:
+
+| Format | File | Quality | Plays on |
+|---|---|---|---|
+| `best` *(default)* | usually `.opus` | Best: YouTube's top stream (~160 kbps Opus), not converted | VLC, foobar2000, browsers, Android, Windows 10/11, most modern apps |
+| `opus` | `.opus` | Same as `best` in practice | same as above |
+| `m4a` | `.m4a` (AAC) | Very good: YouTube's own AAC stream (~128 kbps), not converted | Everything, including iPhone, iTunes and Apple Music |
+| `mp3` | `.mp3` | Good: converted at the highest MP3 quality (VBR V0); converting loses a little | Everything, including old car stereos and MP3 players |
+
+```
+radiolog config --format mp3        # from now on
+radiolog download 12 --format m4a   # just this time
+```
+
+`mp3` needs ffmpeg (the installer offers it). Without ffmpeg you get the original format instead.
+Converting never improves quality: an MP3 made from YouTube's stream can't sound better than the
+stream itself. Pick `mp3` for compatibility, not for quality.
+
+Already-downloaded songs are skipped per format, so switching to `mp3` downloads MP3 versions of
+songs you only have as `.opus`.
+
+### Notes
 
 Downloads use the first YouTube search result for *Artist - Title*. Please respect copyright and
 YouTube's terms in your country.
@@ -195,6 +223,7 @@ Database:      C:\Users\you\.radiolog.db
 Songs logged:  248
 Writable:      yes
 Downloads:     C:\Users\you\Music\radiolog
+Audio format:  best  (the original YouTube stream, no conversion (usually .opus, best quality))
 Settings file: C:\Users\you\AppData\Roaming\radiolog\config.json
 ```
 
@@ -203,6 +232,7 @@ Settings file: C:\Users\you\AppData\Roaming\radiolog\config.json
 | *(none)* | Show where the history and downloads are, how many songs are logged, and whether the history location is writable |
 | `--db LOCATION` | Store the song history somewhere else: a folder or a full file path. Your existing history is moved there (radiolog asks first). If a history file already exists at the new place, radiolog switches to it and doesn't move anything. |
 | `--downloads FOLDER` | Save future downloads in this folder. Files you already downloaded stay where they are. |
+| `--format FORMAT` | Audio format for downloads: `best`, `opus`, `m4a` or `mp3`. See [Audio formats](#audio-formats). |
 | `--reset` | Forget both settings, so the first-time setup runs again on the next start. Your history file and downloaded songs are **not** deleted. |
 
 Both locations are checked for write access. If one needs administrator rights, radiolog warns you
@@ -213,6 +243,7 @@ radiolog config                               # show current settings
 radiolog config --db D:\Music\radiolog         # move the history to D:\Music\radiolog\radiolog.db
 radiolog config --db "D:\My Music\songs.db"    # use a specific file name (quotes for spaces)
 radiolog config --downloads D:\Music           # change the download folder
+radiolog config --format mp3                  # download songs as .mp3 from now on
 radiolog config --db D:\Radio --downloads D:\Radio\songs   # both at once
 radiolog config --reset                       # run the first-time setup again
 ```
