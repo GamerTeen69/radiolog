@@ -1,31 +1,43 @@
 #!/usr/bin/env python3
 """
-radiolog - log and browse what your internet radio played.
+radiolog - logs every song played on your PC, with the date and time it was heard.
+Made for internet radio; works with any player that reports "now playing".
 
-Two ways to capture "Artist - Title":
+First start
+    The first time you run any command, radiolog asks two questions
+    (press Enter for the default):
+      1. where to store your song history   (default: ~/.radiolog.db, i.e. your user folder)
+      2. where to save downloaded songs     (default: ~/Music/radiolog)
+    Choose locations you can write to without administrator rights. If you choose
+    one that needs them (C:\\Program Files, C:\\Windows, /usr, ...), radiolog must be
+    run elevated (Run as administrator / sudo) every time it uses that location.
 
-  1) Stream mode (any OS, most reliable)
-     Connects to the radio stream URL itself and reads the ICY metadata
-     (StreamTitle) that Shoutcast/Icecast stations broadcast.
-         python radiolog.py watch --url http://stream.example.com:8000/radio
+Record
+    radiolog watch --system              follow your media player (Windows media session / Linux MPRIS)
+    radiolog watch --url STREAM_URL      read song titles straight from a Shoutcast/Icecast stream
 
-  2) System mode (reads whatever your media player reports as "now playing")
-     Windows: uses the system media session (the same info as the volume popup).
-              pip install winrt-runtime winrt-Windows.Media.Control winrt-Windows.Foundation winrt-Windows.Foundation.Collections winrt-Windows.Storage.Streams
-     Linux:   uses MPRIS through `playerctl` (install it with your package manager).
-         python radiolog.py watch --system
+Browse
+    radiolog show                        last 50 songs, each with a number (#12)
+    radiolog show --today | --since 3h | --since "2026-10-18 20:00" --until 23:00
+    radiolog show --search queen
+    radiolog show --today --csv today.csv
 
-Browse the history:
-     python radiolog.py show                 # last 50 songs
-     python radiolog.py show --today
-     python radiolog.py show --since 3h
-     python radiolog.py show --since "2026-10-18 20:00" --until "2026-10-18 23:00"
-     python radiolog.py show --search queen
-     python radiolog.py show --today --csv today.csv
+Search and download (song numbers come from 'show'; no number = last song)
+    radiolog pick                        choose songs from a list, then search or download them
+    radiolog search 12 [--ytmusic | --spotify]
+    radiolog download 12 [--video]       best quality via yt-dlp
+    radiolog download 3 5 8-12           batch: several numbers and ranges
+    radiolog download --today            batch: everything heard today
 
-On first start radiolog asks where to store the database. Change it later with
-    radiolog config --db NEW_LOCATION
-(or override per run with the RADIOLOG_DB environment variable).
+Settings
+    radiolog config                      show where the history and downloads are
+    radiolog config --db LOCATION        move the song history (folder or file path)
+    radiolog config --downloads FOLDER   change the download folder
+    radiolog config --reset              forget both settings; setup runs again on next start
+    Settings live in %APPDATA%\\radiolog\\config.json (Linux: ~/.config/radiolog/).
+    The RADIOLOG_DB environment variable overrides the history location for one run.
+
+Run  radiolog COMMAND --help  for all options of a command.
 """
 import argparse
 import csv
@@ -1056,7 +1068,13 @@ def cmd_config(args):
 # --------------------------------------------------------------------------- main
 
 def main():
-    p = argparse.ArgumentParser(description="Log and browse what your internet radio played.")
+    p = argparse.ArgumentParser(
+        prog="radiolog",
+        description="Logs every song played on your PC, with the date and time it was heard. "
+                    "Made for internet radio; works with any player.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="all options of one command:  radiolog COMMAND --help   (e.g. radiolog config --help)\n"
+               "first start asks where to store your history and downloads; see radiolog config --help")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     w = sub.add_parser("watch", help="record songs as they play")
@@ -1078,10 +1096,34 @@ def main():
     s.add_argument("--csv", metavar="FILE", help="export the selection to a CSV file instead of printing")
     s.add_argument("--no-source", action="store_true", help="hide the station/player column")
 
-    c = sub.add_parser("config", help="show or change where the song history is stored")
-    c.add_argument("--db", metavar="LOCATION", help="new folder or file for the database (history is moved)")
-    c.add_argument("--downloads", metavar="FOLDER", help="where 'download' saves songs (default: Music\\radiolog)")
-    c.add_argument("--reset", action="store_true", help="forget the settings; ask again on next start")
+    c = sub.add_parser(
+        "config", help="show or change where the song history and downloads are stored",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Show or change radiolog's two settings: where your song history (database) is\n"
+            "stored, and where downloaded songs are saved. Without options, shows the\n"
+            "current settings, how many songs are logged and whether the history is writable.\n\n"
+            "Choose locations you can write to without administrator rights. Locations that\n"
+            "need them are detected and explained; if you keep one anyway, radiolog must be\n"
+            "run elevated (Run as administrator / sudo) every time it uses it."),
+        epilog=(
+            "examples:\n"
+            "  radiolog config                               show current settings\n"
+            "  radiolog config --db D:\\Music\\radiolog        move the history into that folder\n"
+            "  radiolog config --db \"D:\\My Music\\songs.db\"   use a specific file (quote spaces)\n"
+            "  radiolog config --downloads D:\\Music          save downloads there from now on\n"
+            "  radiolog config --reset                       run the first-time setup again\n\n"
+            "Settings file: %APPDATA%\\radiolog\\config.json (Linux: ~/.config/radiolog/config.json)."))
+    c.add_argument("--db", metavar="LOCATION",
+                   help="store the song history here: a folder or a full .db file path. "
+                        "Your existing history is moved there (asks first); if a history "
+                        "file already exists there, radiolog switches to it instead")
+    c.add_argument("--downloads", metavar="FOLDER",
+                   help="save future downloads in this folder (already downloaded files stay "
+                        "where they are). Default: Music\\radiolog in your user folder")
+    c.add_argument("--reset", action="store_true",
+                   help="forget both settings so the first-time setup runs again on the next "
+                        "start. Your history and downloaded songs are NOT deleted")
 
     def add_filters(sp):
         sp.add_argument("--today", action="store_true", help="only songs from today")

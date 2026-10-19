@@ -145,10 +145,9 @@ downloaded once, and songs already in your download folder are skipped (use `--f
 them again). At the end you get a summary of what was downloaded, skipped or failed.
 Ctrl+C stops after the current song.
 
-Downloads go to the folder you chose during the first-time setup (default: `Music\radiolog` in
-your user folder). If you set radiolog up before this option existed, it asks once before your
-first download. As with the database, pick a folder you can write to without administrator rights.
-Change it any time with `radiolog config --downloads D:\Music`, or use `--dir` for a single download.
+Downloads go to the folder you chose during the [first-time setup](#first-time-setup)
+(default: `Music\radiolog` in your user folder). Change it with `radiolog config --downloads FOLDER`,
+or use `--dir FOLDER` for a single download.
 
 **What "best quality" means here:** yt-dlp takes the best audio stream YouTube offers and saves it
 **without re-encoding** (usually `.opus` or `.m4a`), so no quality is lost, and adds tags and cover
@@ -159,33 +158,71 @@ cover art and tags. The installer offers to install ffmpeg, or run `winget insta
 Downloads use the first YouTube search result for *Artist - Title*. Please respect copyright and
 YouTube's terms in your country.
 
-## Where the data lives
+## Setup and settings
 
-All songs are stored in a single SQLite database file. **The first time you start radiolog, it asks
-where to keep it**, and then where to save downloaded songs. Press Enter to use the default location in your user folder:
+### First-time setup
 
-- Windows: `C:\Users\<you>\.radiolog.db`
-- Linux / macOS: `~/.radiolog.db`
+The first time you run any radiolog command, it asks two questions. Press **Enter** to accept
+the default shown in brackets.
 
-You can also type any folder (for example `D:\Music\radiolog`) or a full file path.
+| Step | Question | Default (Windows) | Default (Linux / macOS) |
+|---|---|---|---|
+| 1 | Where to store your **song history** (database file) | `C:\Users\<you>\.radiolog.db` | `~/.radiolog.db` |
+| 2 | Where to save **downloaded songs** | `C:\Users\<you>\Music\radiolog` | `~/Music/radiolog` |
 
-> ⚠️ **Choose a location you can write to without administrator rights**, such as your user folder,
+You can type a folder (`D:\Music\radiolog`) or, for the history, a full file path
+(`D:\Music\history.db`). Folders are created if they don't exist. Each user on the computer gets
+their own defaults and settings. If you already have a history file, setup shows how many songs it
+holds and offers to move it if you choose a new place.
+
+If you set radiolog up with a version that didn't ask about downloads yet, it asks that question
+once, right before your first download.
+
+> ⚠️ **Choose locations you can write to without administrator rights**, such as your user folder,
 > Documents or another drive. Folders like `C:\Program Files`, `C:\Windows` or the root of `C:\`
 > (on Linux: `/usr`, `/opt`, `/etc`) need administrator rights. If you choose one of those, radiolog
-> must be run **elevated every time**: from a terminal opened with *Run as administrator*
-> (Linux/macOS: with `sudo`). radiolog checks the location and warns you before saving it.
+> must be run **elevated every time** it uses that location: from a terminal opened with
+> *Run as administrator* (Linux/macOS: with `sudo`). radiolog tests every location before saving it,
+> and if it can't write there it explains why and lets you pick another place or keep it anyway.
 
-Change the location later (your existing history is moved for you):
+### Changing settings: `radiolog config`
+
+Run it without options to see your current settings:
 
 ```
-radiolog config                       # show where the history is and whether it's writable
-radiolog config --db D:\Music\radiolog  # move it somewhere else
-radiolog config --reset               # ask again on next start
+> radiolog config
+Database:      C:\Users\you\.radiolog.db
+Songs logged:  248
+Writable:      yes
+Downloads:     C:\Users\you\Music\radiolog
+Settings file: C:\Users\you\AppData\Roaming\radiolog\config.json
 ```
 
-The setting itself is saved in `%APPDATA%\radiolog\config.json` (Linux: `~/.config/radiolog/`,
-macOS: `~/Library/Application Support/radiolog/`). For a one-off override, set the `RADIOLOG_DB`
-environment variable. Uninstalling radiolog keeps your history.
+| Option | What it does |
+|---|---|
+| *(none)* | Show where the history and downloads are, how many songs are logged, and whether the history location is writable |
+| `--db LOCATION` | Store the song history somewhere else: a folder or a full file path. Your existing history is moved there (radiolog asks first). If a history file already exists at the new place, radiolog switches to it and doesn't move anything. |
+| `--downloads FOLDER` | Save future downloads in this folder. Files you already downloaded stay where they are. |
+| `--reset` | Forget both settings, so the first-time setup runs again on the next start. Your history file and downloaded songs are **not** deleted. |
+
+Both locations are checked for write access. If one needs administrator rights, radiolog warns you
+and asks before saving it.
+
+```
+radiolog config                               # show current settings
+radiolog config --db D:\Music\radiolog         # move the history to D:\Music\radiolog\radiolog.db
+radiolog config --db "D:\My Music\songs.db"    # use a specific file name (quotes for spaces)
+radiolog config --downloads D:\Music           # change the download folder
+radiolog config --db D:\Radio --downloads D:\Radio\songs   # both at once
+radiolog config --reset                       # run the first-time setup again
+```
+
+**Good to know**
+- Settings are stored per user in `%APPDATA%\radiolog\config.json` (Linux: `~/.config/radiolog/`,
+  macOS: `~/Library/Application Support/radiolog/`).
+- `radiolog download --dir FOLDER` saves into another folder for one download without changing the setting.
+- The `RADIOLOG_DB` environment variable overrides the history location for that run only.
+- Uninstalling radiolog keeps your history and your downloads.
 
 ## Troubleshooting
 
