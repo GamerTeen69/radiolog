@@ -21,7 +21,7 @@ Watching the system media session every 5s   (Ctrl+C to stop)
 ```
 
 **Contents:** [Features](#features) · [Requirements](#requirements) · [Install](#install) ·
-[Usage](#usage) · [Search or download](#search-or-download-a-song) · [Audio formats](#audio-formats) ·
+[Usage](#usage) · [Clear the history](#clear-the-history) · [Search or download](#search-or-download-a-song) · [Audio formats](#audio-formats) ·
 [Setup and settings](#setup-and-settings) · [Troubleshooting](#troubleshooting) ·
 [Update / Uninstall](#update--uninstall)
 
@@ -44,6 +44,8 @@ Watching the system media session every 5s   (Ctrl+C to stop)
   Prefer **MP3** or **M4A** for older devices? Set it once with `radiolog config --format`.
   **Batch download** whole ranges, a day's listening or search results, with no duplicates.
 - **CSV export** that opens cleanly in Excel.
+- **Clear the history** completely or partly (chosen songs, older than N days, matching text),
+  with a confirmation and an automatic backup.
 - **Handles Polish and other non-English titles**, including stations that send
   Windows-1250 text instead of UTF-8.
 - **Survives dropped connections**: stream mode reconnects automatically.
@@ -105,6 +107,27 @@ radiolog show --today --csv today.csv            # export to a spreadsheet
 | `--no-source` | hide the station / player name |
 
 Every song has a number (`#12`), which the commands below use.
+
+### Clear the history
+
+Delete everything, chosen songs, or a time range:
+
+```
+radiolog clear                     # delete the whole history
+radiolog clear 12                  # delete song #12
+radiolog clear 3 5 8-12            # delete several songs
+radiolog clear --today             # delete today's songs
+radiolog clear --until 30d         # delete songs older than 30 days
+radiolog clear --search "ad break" # delete entries matching a text (e.g. adverts, jingles)
+```
+
+radiolog shows what will be deleted and asks you to type **yes**. Before deleting, it saves a backup
+copy next to the database (`radiolog-backup-<date>.db`), so a mistake can be undone: close radiolog
+and copy the backup over the database file (its location is shown by `radiolog config`).
+Downloaded songs and settings are never touched.
+
+`-y` skips the question (needed when running from a script) and `--no-backup` skips the backup.
+Old backups aren't removed automatically; delete them when you no longer need them.
 
 ### Search or download a song
 
@@ -315,6 +338,10 @@ name, download it yourself: `yt-dlp -x "VIDEO_LINK"`. In a batch, these songs ar
 **`.png` / `.webp` files next to my songs**: those are cover images that versions before 1.5
 couldn't embed. radiolog now removes such leftovers when it downloads or skips that song; you can
 also just delete them.
+
+**I cleared songs by mistake**: every `radiolog clear` saves a backup first. Stop `radiolog watch`
+if it's running, then copy the newest `radiolog-backup-….db` (in the same folder as your database,
+see `radiolog config`) over the database file.
 
 **The download is the wrong song**: radiolog uses the first YouTube result for *Artist - Title*.
 Check with `radiolog search NUMBER` first, or download that video yourself with yt-dlp.

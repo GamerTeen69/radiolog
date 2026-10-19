@@ -31,6 +31,11 @@ Search and download (song numbers come from 'show'; no number = last song)
     radiolog download 3 5 8-12           batch: several numbers and ranges
     radiolog download --today            batch: everything heard today
 
+Clear the history (asks first, saves a backup; downloads are not touched)
+    radiolog clear                       delete everything
+    radiolog clear 3 5 8-12              delete chosen songs
+    radiolog clear --until 30d           delete songs older than 30 days
+
 Settings
     radiolog config                      show where the history and downloads are
     radiolog config --db LOCATION        move the song history (folder or file path)
@@ -1107,6 +1112,81 @@ def cmd_pick(args):
         print()
 
 
+# --------------------------------------------------------------------------- clear
+
+def cmd_clear(args):
+    """Delete songs from the history: everything, chosen numbers, or a filtered selection."""
+    if args.songs and has_filters(args):
+        raise SystemExit("Use either song numbers or filters (--today, --since, --until, --search), not both.")
+    con = db_connect()
+
+    if args.songs:
+        ids = [int(i) for i in parse_song_refs(args.songs) if i != "last"]
+        if "last" in parse_song_refs(args.songs):
+            ids.append(get_song("last")[0])
+        rows = [r for i in sorted(set(ids)) for r in con.execute(
+            "SELECT id, played_at, artist, title, source FROM plays WHERE id = ?", (i,))]
+        what = "the selected songs"
+    elif has_filters(args):
+        args.limit = None
+        rows = query_rows(args, default_limit=None)
+        what = "the songs matching your filters"
+    else:
+        rows = con.execute("SELECT id, played_at, artist, title, source FROM plays ORDER BY id").fetchall()
+        what = "your ENTIRE song history"
+
+    total = con.execute("SELECT COUNT(*) FROM plays").fetchone()[0]
+    if not rows:
+        print("Nothing to delete: no songs match." if total else "The history is already empty.")
+        return
+
+    print(f"\nThis will delete {what}: {len(rows)} of {total} song(s).")
+    if len(rows) <= 10:
+        print_rows(rows, show_source=False)
+    else:
+        print_rows(rows[:5], show_source=False)
+        print(f"  … {len(rows) - 10} more …")
+        print_rows(rows[-5:], show_source=False)
+    print(f"\nDatabase: {DB_PATH}")
+    print("Downloaded songs and your settings are not affected.")
+
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise SystemExit("Not deleting anything: add -y to confirm when not running in a terminal.")
+        answer = ask("\nType 'yes' to delete them: ", "").lower()
+        if answer not in ("yes", "tak"):
+            print("Cancelled. Nothing was deleted.")
+            return
+
+    backup = None
+    if not args.no_backup:
+        stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        backup = DB_PATH.with_name(f"{DB_PATH.stem}-backup-{stamp}{DB_PATH.suffix}")
+        n = 2
+        while backup.exists():              # never overwrite an earlier backup
+            backup = DB_PATH.with_name(f"{DB_PATH.stem}-backup-{stamp}-{n}{DB_PATH.suffix}")
+            n += 1
+        try:
+            backup_con = sqlite3.connect(backup)
+            con.backup(backup_con)          # consistent copy, even while 'watch' is running
+            backup_con.close()
+        except (sqlite3.Error, OSError) as e:
+            raise SystemExit(f"Couldn't save a backup to {backup} ({e}).\n"
+                             "Nothing was deleted. Use --no-backup to delete without one.")
+
+    con.executemany("DELETE FROM plays WHERE id = ?", [(r[0],) for r in rows])
+    con.commit()
+    try:
+        con.execute("VACUUM")               # actually shrink the file
+    except sqlite3.Error:
+        pass
+    left = con.execute("SELECT COUNT(*) FROM plays").fetchone()[0]
+    print(f"\n✔ Deleted {len(rows)} song(s). {left} left in the history.")
+    if backup:
+        print(f"  Backup of the previous history: {backup}\n"
+              "  (to undo: close radiolog and copy the backup over the database file)")
+
+
 # --------------------------------------------------------------------------- config
 
 def cmd_config(args):
@@ -1295,6 +1375,32 @@ def main():
     add_filters(k)
     k.add_argument("--dir", help="save downloads into this folder this time (setting unchanged)")
 
+    x = sub.add_parser(
+        "clear", help="delete songs from the history (all, chosen numbers, or a time range)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Delete songs from your history.\n"
+            "  no arguments      delete EVERYTHING\n"
+            "  song numbers      delete those songs (3 5 8-12)\n"
+            "  filters           delete the matching songs (--today, --since, --until, --search)\n\n"
+            "radiolog shows what will be deleted and asks you to type 'yes'. Before deleting it\n"
+            "saves a backup copy of the database next to it (radiolog-backup-<date>.db), so a\n"
+            "mistake can be undone. Downloaded songs and settings are never touched."),
+        epilog=(
+            "examples:\n"
+            "  radiolog clear                     delete the whole history (asks first)\n"
+            "  radiolog clear 12                  delete song #12\n"
+            "  radiolog clear 3 5 8-12            delete several songs\n"
+            "  radiolog clear --today             delete today's songs\n"
+            "  radiolog clear --until 30d         delete songs older than 30 days\n"
+            "  radiolog clear --search \"ad break\" delete entries matching a text (e.g. adverts)\n"
+            "  radiolog clear -y --no-backup      no questions, no backup (careful!)"))
+    x.add_argument("songs", nargs="*", metavar="SONG",
+                   help="song numbers or ranges from 'show' to delete (default: all songs)")
+    add_filters(x)
+    x.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
+    x.add_argument("--no-backup", action="store_true", help="don't save a backup copy first")
+
     f = sub.add_parser(
         "search", help="search a song on YouTube or Spotify (opens the browser)", formatter_class=argparse.RawDescriptionHelpFormatter,
         description="Open a search for a logged song (\"Artist - Title\") in your web browser.",
@@ -1359,6 +1465,9 @@ def main():
             cmd_config(args)
             return
         DB_PATH = resolve_db_path()
+        if args.cmd == "clear":
+            cmd_clear(args)
+            return
         if args.cmd == "pick":
             cmd_pick(args)
             return
