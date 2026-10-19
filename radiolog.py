@@ -751,14 +751,28 @@ def audio_format():
     return fmt if fmt in AUDIO_FORMATS else "best"
 
 
+MEDIA_EXTS = {".opus", ".webm", ".ogg", ".oga", ".m4a", ".mp4", ".aac", ".mp3", ".flac", ".wav",
+              ".mka", ".mkv", ".mov", ".3gp"}
+THUMB_EXTS = {".webp", ".png", ".jpg", ".jpeg"}
+
+
 def format_exts(fmt, video=False):
-    """File extensions a finished download in this format can have (None = any)."""
+    """File extensions a finished download in this format can have."""
     if video or fmt == "best":
-        return None
+        return MEDIA_EXTS
     return {"opus": {".opus", ".webm", ".ogg"}, "m4a": {".m4a"}, "mp3": {".mp3"}}[fmt]
 
 
-def build_ytdlp_cmd(artist, title, folder, video=False, have_ffmpeg=True, fmt=None):
+def search_queries(artist, title):
+    """What to search YouTube for: 'Artist - Title', then a plainer version without punctuation
+    (apostrophes, dashes, brackets… sometimes make YouTube's search return nothing)."""
+    first = song_query(artist, title).replace('"', "")
+    plain = re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", f"{artist} {title}")).strip()
+    return [first] + ([plain] if plain and plain.lower() != first.lower() else [])
+
+
+def build_ytdlp_cmd(artist, title, folder, video=False, have_ffmpeg=True, fmt=None, query=None,
+                    force=False):
     """yt-dlp command that finds the song on YouTube and downloads the best quality available."""
     fmt = fmt or audio_format()
     name = output_name(artist, title, video)
@@ -787,7 +801,9 @@ def build_ytdlp_cmd(artist, title, folder, video=False, have_ffmpeg=True, fmt=No
         cmd += ["-f", "ba/b"]       # (also mp3 without ffmpeg: can't convert, keep the original)
     if have_ffmpeg:
         cmd += ["--embed-metadata", "--embed-thumbnail"]
-    cmd.append("ytsearch1:" + song_query(artist, title).replace('"', ""))
+    if force:
+        cmd.append("--force-overwrites")
+    cmd.append("ytsearch1:" + (query or search_queries(artist, title)[0]))
     return cmd
 
 
@@ -810,11 +826,21 @@ def already_downloaded(folder, artist, title, video):
     if not folder.is_dir():
         return None
     for f in folder.iterdir():
-        ext = f.suffix.lower()
-        if f.is_file() and f.stem == name and ext not in (".part", ".ytdl", ".temp") \
-                and (wanted is None or ext in wanted):
+        if f.is_file() and f.stem == name and f.suffix.lower() in wanted:
             return f
     return None
+
+
+def remove_leftover_thumbnails(folder, artist, title, video):
+    """yt-dlp leaves the cover image behind when it can't embed it; tidy those up."""
+    name = output_name(artist, title, video)
+    for ext in THUMB_EXTS:
+        f = folder / f"{name}{ext}"
+        try:
+            if f.is_file():
+                f.unlink()
+        except OSError:
+            pass
 
 
 YTDLP_MISSING = ("yt-dlp is not installed. Re-run the radiolog installer, or:\n"
@@ -834,10 +860,12 @@ def ffmpeg_note(video):
 
 def download_song(artist, title, folder=None, video=False, print_only=False, quiet_header=False,
                   force=False):
-    """Download one song. Returns 'ok', 'skipped', 'failed' or 'missing' (yt-dlp not installed)."""
+    """Download one song. Returns 'ok', 'skipped', 'notfound', 'failed' or 'missing'
+    (yt-dlp not installed)."""
     folder = download_dir(folder, ask_if_unset=not print_only)
     have_ffmpeg = bool(shutil.which("ffmpeg"))
-    cmd = build_ytdlp_cmd(artist, title, folder, video, have_ffmpeg)
+    queries = search_queries(artist, title)
+    cmd = build_ytdlp_cmd(artist, title, folder, video, have_ffmpeg, query=queries[0], force=force)
     base = ytdlp_base()
 
     if print_only:
@@ -849,6 +877,7 @@ def download_song(artist, title, folder=None, video=False, print_only=False, qui
         return "missing"
     existing = None if force else already_downloaded(folder, artist, title, video)
     if existing:
+        remove_leftover_thumbnails(folder, artist, title, video)
         print(f"↷ Already downloaded: {existing.name}  (skipped)")
         return "skipped"
     if not have_ffmpeg and not quiet_header:
@@ -859,12 +888,31 @@ def download_song(artist, title, folder=None, video=False, print_only=False, qui
     print(f"Downloading: {song_query(artist, title)}   ({kind}, best quality)")
     if not quiet_header:
         print(f"Into:        {folder}")
-        print(f"Command:     {show_cmd(['yt-dlp'] + cmd)}\n")
-    code = subprocess.call(base + cmd)
+
+    code = 0
+    for n, query in enumerate(queries):
+        cmd = build_ytdlp_cmd(artist, title, folder, video, have_ffmpeg, query=query, force=force)
+        if n:
+            print(f"\nNothing found for that. Trying a simpler search: {query}")
+        if not quiet_header or n:
+            print(f"Command:     {show_cmd(['yt-dlp'] + cmd)}\n")
+        code = subprocess.call(base + cmd)
+        saved = already_downloaded(folder, artist, title, video)
+        if saved:
+            remove_leftover_thumbnails(folder, artist, title, video)
+            if code != 0:
+                print("\n⚠ The song was saved, but yt-dlp reported a problem afterwards "
+                      "(usually the cover art or tags).")
+            if not quiet_header:
+                print(f"\n✔ Done. Saved as: {saved}")
+            return "ok"
+        if code != 0:
+            break                       # a real error, not an empty search: don't retry
+
     if code == 0:
-        if not quiet_header:
-            print(f"\n✔ Done. Saved in {folder}")
-        return "ok"
+        print(f"\n✖ Not found on YouTube: {song_query(artist, title)}\n"
+              "  Nothing was downloaded. Check the song with:  radiolog search NUMBER")
+        return "notfound"
     if not quiet_header:
         print(f"\n✖ yt-dlp stopped with an error (code {code}). If YouTube changed something,\n"
               "  updating usually fixes it: re-run the installer, or\n"
@@ -950,7 +998,7 @@ def batch_download(songs, folder=None, video=False, print_only=False, confirm=Tr
         print()
         ffmpeg_note(video)
 
-    results = {"ok": [], "skipped": [], "failed": []}
+    results = {"ok": [], "skipped": [], "notfound": [], "failed": []}
     try:
         for n, (_, artist, title) in enumerate(songs, 1):
             print(f"\n[{n}/{len(songs)}] ", end="")
@@ -961,7 +1009,9 @@ def batch_download(songs, folder=None, video=False, print_only=False, confirm=Tr
 
     print("\n" + "─" * 50)
     print(f"✔ downloaded: {len(results['ok'])}    ↷ already had: {len(results['skipped'])}"
-          f"    ✖ failed: {len(results['failed'])}")
+          f"    ? not found: {len(results['notfound'])}    ✖ failed: {len(results['failed'])}")
+    for name in results["notfound"]:
+        print(f"   ? {name}  (no YouTube result)")
     for name in results["failed"]:
         print(f"   ✖ {name}")
     if results["failed"]:

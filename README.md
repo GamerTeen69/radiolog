@@ -162,7 +162,8 @@ In `radiolog pick` you can also type several numbers (`3 5 8-12`) or `all`.
 
 A batch download shows the list and asks once before starting. Songs played several times are
 downloaded once, and songs already in your download folder are skipped (use `--force` to download
-them again). At the end you get a summary of what was downloaded, skipped or failed.
+them again). At the end you get a summary of what was downloaded, skipped, not found on YouTube,
+or failed.
 Ctrl+C stops after the current song.
 
 Downloads go to the folder you chose during the [first-time setup](#first-time-setup)
@@ -305,6 +306,16 @@ the song was saved. Run the installer from the latest version.
 **I chose `mp3` but got `.opus` files**: converting to MP3 needs ffmpeg. Install it
 (`winget install Gyan.FFmpeg`), open a new terminal and download again.
 
+**"Not found on YouTube"**: YouTube's search returned nothing for *Artist - Title*. radiolog
+already retries with a simpler search (without dashes, apostrophes and other punctuation) before
+giving up. Look the song up with `radiolog search NUMBER`. If it's on YouTube under a different
+name, download it yourself: `yt-dlp -x "VIDEO_LINK"`. In a batch, these songs are listed under
+*not found*.
+
+**`.png` / `.webp` files next to my songs**: those are cover images that versions before 1.5
+couldn't embed. radiolog now removes such leftovers when it downloads or skips that song; you can
+also just delete them.
+
 **The download is the wrong song**: radiolog uses the first YouTube result for *Artist - Title*.
 Check with `radiolog search NUMBER` first, or download that video yourself with yt-dlp.
 
@@ -327,5 +338,6 @@ somewhere you can write to with `radiolog config --db NEW_LOCATION`.
 - A new entry is saved only when the artist/title changes.
 - **Search** opens a YouTube, YouTube Music or Spotify search URL for *Artist - Title* in your browser.
 - **Download** runs yt-dlp with `ytsearch1:"Artist - Title"`, picks the best stream for the chosen
-  format, and (with ffmpeg) extracts the audio, adds tags and cover art. `--print-cmd` shows the
-  exact command.
+  format, and (with ffmpeg) extracts the audio, adds tags and cover art. If the search finds
+  nothing, it retries once with a plain "Artist Title" query. Afterwards radiolog checks that the
+  file really exists before reporting success. `--print-cmd` shows the exact command.
