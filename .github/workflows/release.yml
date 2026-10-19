@@ -1,0 +1,55 @@
+# Publishes a GitHub release automatically when a commit on main changes the version.
+#
+# To release:  bump `version` in pyproject.toml (e.g. 1.5.2 -> 1.6.0), optionally add
+# release-notes/<version>.md with the release description, commit and push.
+# If the tag v<version> already exists, nothing happens.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version
+        id: version
+        run: |
+          VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "v$VERSION is already released; nothing to do."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build zip
+        if: steps.version.outputs.exists == 'false'
+        run: git archive --format=zip --prefix=radiolog/ -o "radiolog-${{ steps.version.outputs.version }}.zip" HEAD
+
+      - name: Create release
+        if: steps.version.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [ -f "release-notes/$VERSION.md" ]; then
+            NOTES=(--notes-file "release-notes/$VERSION.md")
+          else
+            NOTES=(--generate-notes)
+          fi
+          gh release create "v$VERSION" "radiolog-$VERSION.zip" \
+            --title "radiolog $VERSION" \
+            --target "$GITHUB_SHA" \
+            --latest \
+            "${NOTES[@]}"

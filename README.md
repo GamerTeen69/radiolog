@@ -329,6 +329,13 @@ somewhere you can write to with `radiolog config --db NEW_LOCATION`.
   old folder and run the installer again. Your history, downloads and settings are kept.
 - **Uninstall:** double-click `uninstall.bat` (Windows) or run `./install.sh --uninstall`.
 
+## Releases (for maintainers)
+
+Releases are published automatically by GitHub Actions (`.github/workflows/release.yml`):
+bump `version` in `pyproject.toml`, optionally add `release-notes/<version>.md` with the
+description, then commit and push to `main`. GitHub creates the tag `v<version>`, the release, and
+attaches `radiolog-<version>.zip`. If that version is already released, nothing happens.
+
 ## How it works
 
 - **System mode** asks the operating system's media session for the current artist and title
