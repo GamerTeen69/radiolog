@@ -553,8 +553,9 @@ def query_rows(args, default_limit=50):
     if args.search:
         sql += " AND (artist LIKE ? OR title LIKE ?)"; params += [f"%{args.search}%"] * 2
     sql += " ORDER BY played_at DESC, id DESC"
-    if not (since or args.until) or args.limit is not None:
-        sql += " LIMIT ?"; params.append(args.limit if args.limit is not None else default_limit)
+    limit = args.limit if args.limit is not None else (None if (since or args.until) else default_limit)
+    if limit is not None:
+        sql += " LIMIT ?"; params.append(limit)
     return list(reversed(con.execute(sql, params).fetchall()))
 
 
@@ -657,7 +658,7 @@ def ytdlp_base():
 
 def build_ytdlp_cmd(artist, title, folder, video=False, have_ffmpeg=True):
     """yt-dlp command that finds the song on YouTube and downloads the best quality available."""
-    name = safe_filename(song_query(artist, title))
+    name = output_name(artist, title, video)
     cmd = ["--no-playlist", "--paths", str(folder), "-o", f"{name}.%(ext)s"]
     if video and have_ffmpeg:
         # best video + best audio streams, merged into .mkv (holds any codec, no re-encoding)
@@ -683,7 +684,37 @@ def show_cmd(cmd):
     return " ".join(shlex.quote(c) for c in cmd)
 
 
-def download_song(artist, title, folder=None, video=False, print_only=False):
+def output_name(artist, title, video=False):
+    return safe_filename(song_query(artist, title) + (" (video)" if video else ""))
+
+
+def already_downloaded(folder, artist, title, video):
+    """Finished file for this song in the folder (ignores yt-dlp's unfinished .part files)."""
+    name = output_name(artist, title, video)
+    if not folder.is_dir():
+        return None
+    for f in folder.iterdir():
+        if f.is_file() and f.stem == name and f.suffix.lower() not in (".part", ".ytdl", ".temp"):
+            return f
+    return None
+
+
+YTDLP_MISSING = ("yt-dlp is not installed. Re-run the radiolog installer, or:\n"
+                 "  py -m pip install --user -U yt-dlp" if IS_WIN else
+                 "yt-dlp is not installed. Re-run ./install.sh, or:  pipx install yt-dlp")
+
+
+def ffmpeg_note(video):
+    print("Note: ffmpeg was not found, so files are saved exactly as YouTube streams them\n"
+          "      (still the best quality, but without cover art/tags" +
+          (", and video without merging)." if video else ")."))
+    print("      Install it for the full result:  " +
+          ("winget install Gyan.FFmpeg" if IS_WIN else "sudo apt install ffmpeg") + "\n")
+
+
+def download_song(artist, title, folder=None, video=False, print_only=False, quiet_header=False,
+                  force=False):
+    """Download one song. Returns 'ok', 'skipped', 'failed' or 'missing' (yt-dlp not installed)."""
     folder = Path(folder).expanduser() if folder else default_download_dir()
     have_ffmpeg = bool(shutil.which("ffmpeg"))
     cmd = build_ytdlp_cmd(artist, title, folder, video, have_ffmpeg)
@@ -691,30 +722,129 @@ def download_song(artist, title, folder=None, video=False, print_only=False):
 
     if print_only:
         print(show_cmd(["yt-dlp"] + cmd))
-        return
+        return "ok"
     if not base:
-        print("yt-dlp is not installed. Re-run the radiolog installer, or:\n"
-              "  py -m pip install --user -U yt-dlp" if IS_WIN else
-              "yt-dlp is not installed. Re-run ./install.sh, or:  pipx install yt-dlp")
+        print(YTDLP_MISSING)
         print("\nThe command it would run:\n  " + show_cmd(["yt-dlp"] + cmd))
-        return
-    if not have_ffmpeg:
-        print("Note: ffmpeg was not found, so the file is saved exactly as YouTube streams it\n"
-              "      (still the best quality, but without cover art/tags" +
-              (", and video without merging)." if video else ")."))
-        print("      Install it for the full result:  " +
-              ("winget install Gyan.FFmpeg" if IS_WIN else "sudo apt install ffmpeg") + "\n")
+        return "missing"
+    existing = None if force else already_downloaded(folder, artist, title, video)
+    if existing:
+        print(f"↷ Already downloaded: {existing.name}  (skipped)")
+        return "skipped"
+    if not have_ffmpeg and not quiet_header:
+        ffmpeg_note(video)
 
     folder.mkdir(parents=True, exist_ok=True)
     print(f"Downloading: {song_query(artist, title)}   ({'video' if video else 'audio'}, best quality)")
-    print(f"Into:        {folder}")
-    print(f"Command:     {show_cmd(['yt-dlp'] + cmd)}\n")
+    if not quiet_header:
+        print(f"Into:        {folder}")
+        print(f"Command:     {show_cmd(['yt-dlp'] + cmd)}\n")
     code = subprocess.call(base + cmd)
     if code == 0:
-        print(f"\n✔ Done. Saved in {folder}")
-    else:
+        if not quiet_header:
+            print(f"\n✔ Done. Saved in {folder}")
+        return "ok"
+    if not quiet_header:
         print(f"\n✖ yt-dlp stopped with an error (code {code}). If YouTube changed something,\n"
               "  updating usually fixes it:  re-run the installer, or  py -m pip install -U yt-dlp")
+    return "failed"
+
+
+def unique_songs(songs):
+    """Drop repeats of the same artist+title (radio plays hits many times)."""
+    seen, out = set(), []
+    for s in songs:
+        key = ((s[1] or "").lower(), s[2].lower())
+        if key not in seen:
+            seen.add(key)
+            out.append(s)
+    return out
+
+
+def parse_song_refs(refs, available=None):
+    """'3 5,7 10-15 last' -> list of song numbers (ranges limited to what exists)."""
+    ids = []
+    for token in re.split(r"[\s,]+", " ".join(refs).strip()):
+        token = token.lstrip("#").lower()
+        if not token:
+            continue
+        m = re.fullmatch(r"(\d+)-#?(\d+)", token)
+        if m:
+            a, b = sorted((int(m.group(1)), int(m.group(2))))
+            ids += [i for i in range(a, b + 1) if available is None or i in available]
+        elif token.isdigit() or token == "last":
+            ids.append(token)
+        else:
+            raise SystemExit(f"'{token}' is not a song number or range (examples: 12, 3-8, last).")
+    return ids
+
+
+def songs_from_ids(ids):
+    """Look up song numbers; numbers from a range that don't exist are skipped silently."""
+    con = db_connect()
+    out = []
+    for i in ids:
+        if i == "last":
+            out.append(get_song("last"))
+            continue
+        row = con.execute("SELECT id, artist, title FROM plays WHERE id = ?", (int(i),)).fetchone()
+        if row:
+            out.append(row)
+        else:
+            print(f"(no song #{i}, skipped)")
+    return out
+
+
+def batch_download(songs, folder=None, video=False, print_only=False, confirm=True, force=False):
+    songs = unique_songs(songs)
+    if not songs:
+        print("No songs to download.")
+        return
+    if len(songs) == 1:
+        _, artist, title = songs[0]
+        download_song(artist, title, folder, video, print_only, force=force)
+        return
+
+    folder = Path(folder).expanduser() if folder else default_download_dir()
+    if print_only:
+        for _, artist, title in songs:
+            download_song(artist, title, folder, video, print_only=True)
+        return
+    if not ytdlp_base():
+        print(YTDLP_MISSING)
+        return
+
+    kind = "video" if video else "audio"
+    print(f"\nBatch download: {len(songs)} songs ({kind}, best quality)\nInto: {folder}\n")
+    for _, artist, title in songs[:10]:
+        print(f"  • {song_query(artist, title)}")
+    if len(songs) > 10:
+        print(f"  … and {len(songs) - 10} more")
+    if confirm and sys.stdin.isatty():
+        if ask(f"\nDownload all {len(songs)}? [Y/n]: ", "y").lower() not in ("y", "yes", "t", "tak"):
+            print("Cancelled.")
+            return
+    if not shutil.which("ffmpeg"):
+        print()
+        ffmpeg_note(video)
+
+    results = {"ok": [], "skipped": [], "failed": []}
+    try:
+        for n, (_, artist, title) in enumerate(songs, 1):
+            print(f"\n[{n}/{len(songs)}] ", end="")
+            status = download_song(artist, title, folder, video, quiet_header=True, force=force)
+            results[status if status in results else "failed"].append(song_query(artist, title))
+    except KeyboardInterrupt:
+        print("\n\nStopped. Songs not started yet were not downloaded.")
+
+    print("\n" + "─" * 50)
+    print(f"✔ downloaded: {len(results['ok'])}    ↷ already had: {len(results['skipped'])}"
+          f"    ✖ failed: {len(results['failed'])}")
+    for name in results["failed"]:
+        print(f"   ✖ {name}")
+    if results["failed"]:
+        print("  Try those again later, or update yt-dlp (re-run the installer).")
+    print(f"Saved in: {folder}")
 
 
 def cmd_search(args):
@@ -722,9 +852,18 @@ def cmd_search(args):
     open_search(args.service, artist, title)
 
 
+def has_filters(args):
+    return any([args.today, args.since, args.until, args.search])
+
+
 def cmd_download(args):
-    _, artist, title = get_song(args.song)
-    download_song(artist, title, args.dir, args.video, args.print_cmd)
+    if args.songs and has_filters(args):
+        raise SystemExit("Use either song numbers or filters (--today, --since, --search…), not both.")
+    if has_filters(args):
+        songs = [(r[0], r[2], r[3]) for r in query_rows(args, default_limit=None)]
+    else:
+        songs = songs_from_ids(parse_song_refs(args.songs or ["last"]))
+    batch_download(songs, args.dir, args.video, args.print_cmd, confirm=not args.yes, force=args.force)
 
 
 def cmd_pick(args):
@@ -735,24 +874,51 @@ def cmd_pick(args):
     print_rows(rows, show_source=False)
     ids = {r[0]: r for r in rows}
     default = str(rows[-1][0])
+    print("\nTip: pick several at once, e.g.  3 5 8-12  or  all")
     try:
         while True:
-            choice = ask(f"\nSong number [{default}] (q to quit): ", default).lstrip("#").lower()
+            choice = ask(f"\nSong number(s) [{default}] (q to quit): ", default).strip().lower()
             if choice in ("q", "quit", "exit"):
                 return
-            if not choice.isdigit():
-                print("  Type the number shown after #.")
+            try:
+                if choice == "all":
+                    songs = [(r[0], r[2], r[3]) for r in rows]
+                else:
+                    songs = songs_from_ids(parse_song_refs([choice], available=set(ids)))
+            except SystemExit as e:
+                print(f"  {e}")
                 continue
-            if int(choice) in ids:
-                song_id, _, artist, title, _ = ids[int(choice)]
+            if not songs:
+                continue
+
+            if len(songs) == 1:
+                song_id, artist, title = songs[0]
+                print(f"\n  ♪ {song_query(artist, title)}\n"
+                      "  [y] search on YouTube      [m] YouTube Music     [s] Spotify\n"
+                      "  [d] download audio         [v] download video    [c] show yt-dlp command\n"
+                      "  [b] back to the list       [q] quit")
+                valid = "ymsdvcbq"
             else:
-                song_id, artist, title = get_song(choice)
-            print(f"\n  ♪ {song_query(artist, title)}\n"
-                  "  [y] search on YouTube      [m] YouTube Music     [s] Spotify\n"
-                  "  [d] download audio         [v] download video    [c] show yt-dlp command\n"
-                  "  [b] back to the list       [q] quit")
+                songs = unique_songs(songs)
+                print(f"\n  ♪ {len(songs)} songs selected")
+                for _, artist, title in songs[:5]:
+                    print(f"     {song_query(artist, title)}")
+                if len(songs) > 5:
+                    print(f"     … and {len(songs) - 5} more")
+                print("  [d] download all (audio)   [v] download all (video)   [c] show yt-dlp commands\n"
+                      "  [b] back to the list       [q] quit")
+                valid = "dvcbq"
+
             while True:
-                action = ask("  Action: ", "").lower()
+                action = ask("  Action: ", "b").lower()
+                if action not in valid:
+                    print(f"  Choose one of: {', '.join(valid)}")
+                    continue
+                if action == "b":
+                    break
+                if action == "q":
+                    return
+                _, artist, title = songs[0]
                 if action == "y":
                     open_search("youtube", artist, title)
                 elif action == "m":
@@ -760,16 +926,9 @@ def cmd_pick(args):
                 elif action == "s":
                     open_search("spotify", artist, title)
                 elif action in ("d", "v"):
-                    print()
-                    download_song(artist, title, args.dir, video=(action == "v"))
+                    batch_download(songs, args.dir, video=(action == "v"), confirm=False)
                 elif action == "c":
-                    download_song(artist, title, args.dir, print_only=True)
-                elif action in ("b", ""):
-                    break
-                elif action == "q":
-                    return
-                else:
-                    print("  Choose y, m, s, d, v, c, b or q.")
+                    batch_download(songs, args.dir, print_only=True)
     except KeyboardInterrupt:
         print()
 
@@ -870,11 +1029,15 @@ def main():
     svc.add_argument("--spotify", dest="service", action="store_const", const="spotify", help="Spotify")
     f.set_defaults(service="youtube")
 
-    d = sub.add_parser("download", help="download a song with yt-dlp in the best quality available")
-    d.add_argument("song", nargs="?", default="last", help="song number from 'show' (default: last song)")
+    d = sub.add_parser("download", help="download songs with yt-dlp in the best quality available")
+    d.add_argument("songs", nargs="*", metavar="SONG",
+                   help="song numbers or ranges from 'show', e.g. 12  3 5 7  10-15 (default: last song)")
+    add_filters(d)
     d.add_argument("--video", action="store_true", help="download the video instead of audio only")
     d.add_argument("--dir", help="save into this folder instead of the default")
-    d.add_argument("--print-cmd", action="store_true", help="only print the yt-dlp command, don't run it")
+    d.add_argument("--print-cmd", action="store_true", help="only print the yt-dlp commands, don't run them")
+    d.add_argument("-y", "--yes", action="store_true", help="don't ask before a batch download")
+    d.add_argument("--force", action="store_true", help="download again even if the file already exists")
 
     args = p.parse_args()
 
@@ -910,6 +1073,8 @@ def main():
             cmd_show(args)
     except KeyboardInterrupt:
         print("\nStopped.")
+    except BrokenPipeError:          # output piped into e.g. 'head' that closed early
+        sys.stderr.close()
 
 
 if __name__ == "__main__":

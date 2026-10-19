@@ -36,6 +36,7 @@ Watching the system media session every 5s   (Ctrl+C to stop)
 - **Find it again**: open any logged song in a YouTube, YouTube Music or Spotify search with one command.
 - **Download in the best quality available** with a ready-made [yt-dlp](https://github.com/yt-dlp/yt-dlp)
   command: best audio stream with no re-encoding, cover art and tags (or the full video).
+  **Batch download** whole ranges, a day's listening or search results, with no duplicates.
 - **CSV export** that opens cleanly in Excel.
 - **Handles Polish and other non-English titles**, including stations that send
   Windows-1250 text instead of UTF-8.
@@ -119,10 +120,30 @@ radiolog search 12                 # YouTube search in your browser
 radiolog search 12 --ytmusic       # YouTube Music
 radiolog search 12 --spotify       # Spotify
 radiolog download 12               # best-quality audio
-radiolog download 12 --video       # best-quality video
+radiolog download 12 --video       # best-quality video (saved as "… (video).mkv")
 radiolog download 12 --print-cmd   # just print the yt-dlp command to copy
 radiolog download 12 --dir D:\Music
 ```
+
+### Batch download
+
+Download many songs at once: several numbers, ranges, or everything matching a filter.
+
+```
+radiolog download 3 5 7            # several songs
+radiolog download 10-25            # a range
+radiolog download 3 8-12 20        # mixed
+radiolog download --today          # everything heard today
+radiolog download --since 3h --video
+radiolog download --search queen -y   # -y: don't ask for confirmation
+```
+
+In `radiolog pick` you can also type several numbers (`3 5 8-12`) or `all`.
+
+A batch download shows the list and asks once before starting. Songs played several times are
+downloaded once, and songs already in your download folder are skipped (use `--force` to download
+them again). At the end you get a summary of what was downloaded, skipped or failed.
+Ctrl+C stops after the current song.
 
 Downloads go to `Music\radiolog` in your user folder. Change it with
 `radiolog config --downloads D:\Music`.
