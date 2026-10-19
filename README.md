@@ -44,7 +44,8 @@ Watching the system media session every 5s   (Ctrl+C to stop)
 - **Download in the best quality available** with a ready-made [yt-dlp](https://github.com/yt-dlp/yt-dlp)
   command: best audio stream with no re-encoding, cover art and tags (or the full video).
   Prefer **MP3** or **M4A** for older devices? Set it once with `radiolog config --format`.
-  **Batch download** whole ranges, a day's listening or search results, with no duplicates.
+  **Batch download** whole ranges, a day's listening, a genre or search results, with no duplicates,
+  sorted into **artist/genre folders** if you like, with proper artist, title and genre tags.
 - **CSV export** that opens cleanly in Excel.
 - **Updates itself**: `radiolog update` installs the newest release from GitHub.
 - **Clear the history** completely or partly (chosen songs, older than N days, matching text),
@@ -214,6 +215,35 @@ Downloads go to the folder you chose during the [first-time setup](#first-time-s
 (default: `Music\radiolog` in your user folder). Change it with `radiolog config --downloads FOLDER`,
 or use `--dir FOLDER` for a single download.
 
+### Sorting downloads: by genre or artist
+
+Choose songs by genre, set the order, and sort the files into folders:
+
+```
+radiolog download --genre rock                 # every rock song in your history
+radiolog download --today --sort artist        # today's songs, in A-Z artist order
+radiolog pick --genre punk --sort artist       # pick from a sorted, filtered list
+radiolog config --organize genre-artist        # from now on: Rock\Green Day\Green Day - Haushinka.opus
+radiolog download 12 --organize artist         # just this time: Green Day\Green Day - Haushinka.opus
+```
+
+| `--organize` | Where files go |
+|---|---|
+| `flat` *(default)* | all in the download folder |
+| `artist` | `Green Day\Green Day - Haushinka.opus` |
+| `genre` | `Rock\Green Day - Haushinka.opus` |
+| `genre-artist` | `Rock\Green Day\Green Day - Haushinka.opus` |
+
+Songs without a known genre go into `Unknown genre`. Genres come from the same lookup as
+`radiolog show --sort genre` (looked up once per song, then remembered).
+
+Changing the layout doesn't move files you already have, and radiolog still recognizes them in any
+subfolder, so nothing is downloaded twice.
+
+**Tags:** every downloaded song gets radiolog's **artist, title and genre** written into the file,
+so your music player can sort by them too. (YouTube's own "artist" is usually just the channel
+name.) The cover art is kept.
+
 ### Audio formats
 
 By default radiolog keeps the audio exactly as YouTube streams it, **without re-encoding**, so no
@@ -297,6 +327,7 @@ Settings file: C:\Users\you\AppData\Roaming\radiolog\config.json
 | *(none)* | Show where the history and downloads are, the audio format, how many songs are logged, and whether the history location is writable |
 | `--db LOCATION` | Store the song history somewhere else: a folder or a full file path. Your existing history is moved there (radiolog asks first). If a history file already exists at the new place, radiolog switches to it and doesn't move anything. |
 | `--downloads FOLDER` | Save future downloads in this folder. Files you already downloaded stay where they are. |
+| `--organize LAYOUT` | How downloads are sorted into folders: `flat`, `artist`, `genre` or `genre-artist`. See [Sorting downloads](#sorting-downloads-by-genre-or-artist). |
 | `--format FORMAT` | Audio format for downloads: `best`, `opus`, `m4a` or `mp3`. See [Audio formats](#audio-formats). |
 | `--reset` | Forget all settings (history location, download folder, audio format), so the first-time setup runs again on the next start. Your history file and downloaded songs are **not** deleted. |
 
@@ -310,6 +341,7 @@ radiolog config --db D:\Music\radiolog         # move the history to D:\Music\ra
 radiolog config --db "D:\My Music\songs.db"    # use a specific file name (quotes for spaces)
 radiolog config --downloads D:\Music           # change the download folder
 radiolog config --format mp3                  # download songs as .mp3 from now on
+radiolog config --organize genre              # sort downloads into genre folders
 radiolog config --db D:\Radio --downloads D:\Radio\songs   # both at once
 radiolog config --reset                       # run the first-time setup again
 ```

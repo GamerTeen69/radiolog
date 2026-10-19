@@ -33,6 +33,7 @@ Search and download (song numbers come from 'show'; no number = last song)
     radiolog download 12 --format mp3    audio as best (default) | opus | m4a | mp3, this time only
     radiolog download 3 5 8-12           batch: several numbers and ranges
     radiolog download --today            batch: everything heard today
+    radiolog download --genre rock --sort artist   all rock songs, A-Z by artist
 
 Clear the history (asks first, saves a backup; downloads are not touched)
     radiolog clear                       delete everything
@@ -44,6 +45,7 @@ Settings
     radiolog config --db LOCATION        move the song history (folder or file path)
     radiolog config --downloads FOLDER   change the download folder
     radiolog config --format mp3         download audio as best | opus | m4a | mp3
+    radiolog config --organize genre     sort downloads into folders: flat | artist | genre | genre-artist
     radiolog config --reset              forget all settings; setup runs again on next start
     Settings live in %APPDATA%\\radiolog\\config.json (Linux: ~/.config/radiolog/).
     The RADIOLOG_DB environment variable overrides the history location for one run.
@@ -750,7 +752,7 @@ class GenreLookup:
         return (g, "itunes") if g else ("", "")
 
 
-def genres_for(rows, refresh=False):
+def genres_for(rows, refresh=False, quiet=False):
     """{song id: genre} for the given rows, looking up songs not seen before.
     Results are remembered in the database, so each song is looked up only once."""
     con = db_connect()
@@ -773,15 +775,17 @@ def genres_for(rows, refresh=False):
             todo.append((r[2], r[3]))
     if todo:
         lookup = GenreLookup()
-        print(f"Looking up genres for {len(todo)} song(s) (first time only)… Ctrl+C to skip the rest.",
-              flush=True)
+        if not quiet:
+            print(f"Looking up genres for {len(todo)} song(s) (first time only)… Ctrl+C to skip the rest.",
+                  flush=True)
         done = 0
         try:
             for artist, title in todo:
                 try:
                     genre, source = lookup.find(artist, title)
                 except (OSError, ValueError) as e:
-                    print(f"\nCouldn't reach the music databases ({e}). Showing the genres found so far.")
+                    if not quiet:
+                        print(f"\nCouldn't reach the music databases ({e}). Showing the genres found so far.")
                     break
                 k = song_key(artist, title)
                 cache[k] = genre
@@ -789,13 +793,51 @@ def genres_for(rows, refresh=False):
                             (k, genre, source, datetime.now().isoformat(timespec="seconds")))
                 con.commit()
                 done += 1
-                if sys.stdout.isatty():
+                if sys.stdout.isatty() and not quiet:
                     print(f"\r  {done}/{len(todo)}  {(artist + ' — ' + title)[:50]:50}", end="", flush=True)
         except KeyboardInterrupt:
             print("\n(skipped the rest; they'll be looked up next time)")
-        if sys.stdout.isatty():
+        if sys.stdout.isatty() and not quiet:
             print("\r" + " " * 70 + "\r", end="")
     return {rid: cache.get(k, "") for rid, k in keys.items()}
+
+
+def genre_of(artist, title):
+    """Genre of one song (looked up once, then remembered); '' if unknown or offline."""
+    try:
+        return genres_for([(0, "", artist, title, "")], quiet=True).get(0, "")
+    except Exception:
+        return ""
+
+
+def sort_rows(rows, how, genres=None):
+    if how == "artist":
+        rows.sort(key=lambda r: (sort_key_text(r[2]), sort_key_text(r[3]), r[1]))
+    elif how == "title":
+        rows.sort(key=lambda r: (sort_key_text(r[3]), sort_key_text(r[2]), r[1]))
+    elif how == "genre":
+        genres = genres or {}
+        rows.sort(key=lambda r: (genres.get(r[0]) == "", (genres.get(r[0]) or "").lower(),
+                                 sort_key_text(r[2]), sort_key_text(r[3]), r[1]))
+    return rows
+
+
+def select_rows(args, default_limit):
+    """Rows for pick/download/clear with the time/text filters, plus --genre and --sort.
+    Returns (rows, genres) where genres is {id: genre} when genres were needed."""
+    want_genre = getattr(args, "genre", None)
+    how = getattr(args, "sort", None) or "time"
+    explicit = args.limit
+    timed = args.today or args.since or args.until
+    rows = query_rows(args, default_limit=None if (want_genre or how != "time") else default_limit)
+    genres = {}
+    if want_genre or how == "genre":
+        genres = genres_for(rows)
+        if want_genre:
+            rows = [r for r in rows if want_genre.lower() in (genres.get(r[0]) or "").lower()]
+    if (want_genre or how != "time") and explicit is None and not timed and default_limit:
+        rows = rows[-default_limit:]                      # newest N of the matches
+    return sort_rows(rows, how, genres), genres
 
 
 def sort_key_text(s):
@@ -826,13 +868,7 @@ def cmd_show(args):
             latest[k] = r
         rows = sorted(latest.values(), key=lambda r: r[1])
 
-    if args.sort == "artist":
-        rows.sort(key=lambda r: (sort_key_text(r[2]), sort_key_text(r[3]), r[1]))
-    elif args.sort == "title":
-        rows.sort(key=lambda r: (sort_key_text(r[3]), sort_key_text(r[2]), r[1]))
-    elif args.sort == "genre":
-        rows.sort(key=lambda r: (genres.get(r[0]) == "", (genres.get(r[0]) or "").lower(),
-                                 sort_key_text(r[2]), sort_key_text(r[3]), r[1]))
+    sort_rows(rows, args.sort, genres)
 
     if args.csv:
         with open(args.csv, "w", newline="", encoding="utf-8-sig") as fh:
@@ -1036,6 +1072,70 @@ def show_cmd(cmd):
     return " ".join(shlex.quote(c) for c in cmd)
 
 
+LAYOUTS = {
+    "flat":         "all songs in one folder (default)",
+    "artist":       "a folder per artist:            Green Day\\Green Day - Haushinka.opus",
+    "genre":        "a folder per genre:             Rock\\Green Day - Haushinka.opus",
+    "genre-artist": "genre, then artist folders:     Rock\\Green Day\\Green Day - Haushinka.opus",
+}
+LAYOUT_OVERRIDE = None           # set by --organize for one run
+
+
+def layout():
+    lay = LAYOUT_OVERRIDE or load_config().get("download_layout") or "flat"
+    return lay if lay in LAYOUTS else "flat"
+
+
+def song_folder(base, artist, title, genre):
+    lay = layout()
+    a = safe_filename(artist or "Unknown artist")
+    g = safe_filename(genre or "Unknown genre")
+    if lay == "artist":
+        return base / a
+    if lay == "genre":
+        return base / g
+    if lay == "genre-artist":
+        return base / g / a
+    return base
+
+
+def find_existing(base, artist, title, video):
+    """An already downloaded copy anywhere in the download folder (any layout)."""
+    import glob as _glob
+    name = output_name(artist, title, video)
+    wanted = format_exts(audio_format(), video)
+    if not base.is_dir():
+        return None
+    for f in base.rglob(_glob.escape(name) + ".*"):
+        if f.is_file() and f.stem == name and f.suffix.lower() in wanted:
+            return f
+    return None
+
+
+def tag_file(path, artist, title, genre):
+    """Write radiolog's artist, title and genre into the file (YouTube's 'artist' is usually just
+    the channel name). Keeps the cover art. Returns True if tags were written."""
+    if path.suffix.lower() not in (".opus", ".ogg", ".mp3", ".m4a"):
+        return False
+    try:
+        import mutagen
+        f = mutagen.File(str(path), easy=True)
+        if f is None:
+            return False
+        if f.tags is None:
+            f.add_tags()
+        if artist:
+            f["artist"] = artist
+        if title:
+            f["title"] = title
+        if genre:
+            f["genre"] = genre
+        f.save()
+        return True
+    except Exception:
+        return False
+
+
 def output_name(artist, title, video=False):
     return safe_filename(song_query(artist, title) + (" (video)" if video else ""))
 
@@ -1080,33 +1180,41 @@ def ffmpeg_note(video):
 
 
 def download_song(artist, title, folder=None, video=False, print_only=False, quiet_header=False,
-                  force=False):
+                  force=False, genre=None):
     """Download one song. Returns 'ok', 'skipped', 'notfound', 'failed' or 'missing'
     (yt-dlp not installed)."""
-    folder = download_dir(folder, ask_if_unset=not print_only)
+    base = download_dir(folder, ask_if_unset=not print_only)
+    if genre is None:
+        genre = genre_of(artist, title)
+    folder = song_folder(base, artist, title, genre)
     have_ffmpeg = bool(shutil.which("ffmpeg"))
     queries = search_queries(artist, title)
     cmd = build_ytdlp_cmd(artist, title, folder, video, have_ffmpeg, query=queries[0], force=force)
-    base = ytdlp_base()
+    ytdlp = ytdlp_base()
 
     if print_only:
         print(show_cmd(["yt-dlp"] + cmd))
         return "ok"
-    if not base:
+    if not ytdlp:
         print(YTDLP_MISSING)
         print("\nThe command it would run:\n  " + show_cmd(["yt-dlp"] + cmd))
         return "missing"
-    existing = None if force else already_downloaded(folder, artist, title, video)
+    existing = None if force else find_existing(base, artist, title, video)
     if existing:
-        remove_leftover_thumbnails(folder, artist, title, video)
-        print(f"↷ Already downloaded: {existing.name}  (skipped)")
+        remove_leftover_thumbnails(existing.parent, artist, title, video)
+        try:
+            shown = existing.relative_to(base)
+        except ValueError:
+            shown = existing
+        print(f"↷ Already downloaded: {shown}  (skipped)")
         return "skipped"
     if not have_ffmpeg and not quiet_header:
         ffmpeg_note(video)
 
     folder.mkdir(parents=True, exist_ok=True)
     kind = "video" if video else ("audio" if audio_format() == "best" else audio_format())
-    print(f"Downloading: {song_query(artist, title)}   ({kind}, best quality)")
+    print(f"Downloading: {song_query(artist, title)}   ({kind}, best quality"
+          + (f", {genre}" if genre else "") + ")")
     if not quiet_header:
         print(f"Into:        {folder}")
 
@@ -1117,15 +1225,18 @@ def download_song(artist, title, folder=None, video=False, print_only=False, qui
             print(f"\nNothing found for that. Trying a simpler search: {query}")
         if not quiet_header or n:
             print(f"Command:     {show_cmd(['yt-dlp'] + cmd)}\n")
-        code = subprocess.call(base + cmd)
+        code = subprocess.call(ytdlp + cmd)
         saved = already_downloaded(folder, artist, title, video)
         if saved:
             remove_leftover_thumbnails(folder, artist, title, video)
+            tagged = not video and tag_file(saved, artist, title, genre)
             if code != 0:
                 print("\n⚠ The song was saved, but yt-dlp reported a problem afterwards "
                       "(usually the cover art or tags).")
             if not quiet_header:
                 print(f"\n✔ Done. Saved as: {saved}")
+                if tagged:
+                    print("  Tags: " + " · ".join(x for x in (artist, title, genre) if x))
             return "ok"
         if code != 0:
             break                       # a real error, not an empty search: don't retry
@@ -1197,18 +1308,22 @@ def batch_download(songs, folder=None, video=False, print_only=False, confirm=Tr
         return
 
     folder = download_dir(folder, ask_if_unset=not print_only)
-    if print_only:
-        for _, artist, title in songs:
-            download_song(artist, title, folder, video, print_only=True)
-        return
-    if not ytdlp_base():
+    if not print_only and not ytdlp_base():
         print(YTDLP_MISSING)
+        return
+    genres = genres_for([(s[0], "", s[1], s[2], "") for s in songs], quiet=print_only)
+    if print_only:
+        for sid, artist, title in songs:
+            download_song(artist, title, folder, video, print_only=True, genre=genres.get(sid, ""))
         return
 
     kind = "video" if video else ("audio" if audio_format() == "best" else audio_format())
-    print(f"\nBatch download: {len(songs)} songs ({kind}, best quality)\nInto: {folder}\n")
-    for _, artist, title in songs[:10]:
-        print(f"  • {song_query(artist, title)}")
+    lay = layout()
+    print(f"\nBatch download: {len(songs)} songs ({kind}, best quality)\nInto: {folder}"
+          + ("" if lay == "flat" else f"  (sorted into {lay.replace('-', ', then ')} folders)") + "\n")
+    for sid, artist, title in songs[:10]:
+        g = genres.get(sid)
+        print(f"  • {song_query(artist, title)}" + (f"   [{g}]" if g else ""))
     if len(songs) > 10:
         print(f"  … and {len(songs) - 10} more")
     if confirm and sys.stdin.isatty():
@@ -1221,9 +1336,10 @@ def batch_download(songs, folder=None, video=False, print_only=False, confirm=Tr
 
     results = {"ok": [], "skipped": [], "notfound": [], "failed": []}
     try:
-        for n, (_, artist, title) in enumerate(songs, 1):
+        for n, (sid, artist, title) in enumerate(songs, 1):
             print(f"\n[{n}/{len(songs)}] ", end="")
-            status = download_song(artist, title, folder, video, quiet_header=True, force=force)
+            status = download_song(artist, title, folder, video, quiet_header=True, force=force,
+                                   genre=genres.get(sid, ""))
             results[status if status in results else "failed"].append(song_query(artist, title))
     except KeyboardInterrupt:
         print("\n\nStopped. Songs not started yet were not downloaded.")
@@ -1246,23 +1362,27 @@ def cmd_search(args):
 
 
 def has_filters(args):
-    return any([args.today, args.since, args.until, args.search])
+    return any([args.today, args.since, args.until, args.search, getattr(args, "genre", None)])
 
 
 def cmd_download(args):
-    global FORMAT_OVERRIDE
+    global FORMAT_OVERRIDE, LAYOUT_OVERRIDE
     FORMAT_OVERRIDE = args.format
+    LAYOUT_OVERRIDE = args.organize
     if args.songs and has_filters(args):
         raise SystemExit("Use either song numbers or filters (--today, --since, --search…), not both.")
-    if has_filters(args):
-        songs = [(r[0], r[2], r[3]) for r in query_rows(args, default_limit=None)]
+    if has_filters(args) or (args.sort != "time" and not args.songs):
+        rows, _ = select_rows(args, default_limit=None)
+        songs = [(r[0], r[2], r[3]) for r in rows]
     else:
         songs = songs_from_ids(parse_song_refs(args.songs or ["last"]))
     batch_download(songs, args.dir, args.video, args.print_cmd, confirm=not args.yes, force=args.force)
 
 
 def cmd_pick(args):
-    rows = query_rows(args, default_limit=20)
+    global LAYOUT_OVERRIDE
+    LAYOUT_OVERRIDE = args.organize
+    rows, _ = select_rows(args, default_limit=20)
     if not rows:
         print("Nothing logged for that selection yet.")
         return
@@ -1333,7 +1453,7 @@ def cmd_pick(args):
 def cmd_clear(args):
     """Delete songs from the history: everything, chosen numbers, or a filtered selection."""
     if args.songs and has_filters(args):
-        raise SystemExit("Use either song numbers or filters (--today, --since, --until, --search), not both.")
+        raise SystemExit("Use either song numbers or filters (--today, --since, --until, --search, --genre), not both.")
     con = db_connect()
 
     if args.songs:
@@ -1345,7 +1465,7 @@ def cmd_clear(args):
         what = "the selected songs"
     elif has_filters(args):
         args.limit = None
-        rows = query_rows(args, default_limit=None)
+        rows, _ = select_rows(args, default_limit=None)
         what = "the songs matching your filters"
     else:
         rows = con.execute("SELECT id, played_at, artist, title, source FROM plays ORDER BY id").fetchall()
@@ -1540,6 +1660,13 @@ def cmd_config(args):
               "(Your existing history file was not touched.)")
         return
 
+    if args.organize:
+        save_config({"download_layout": args.organize})
+        print(f"✔ Downloads will be organized: {args.organize}  ({LAYOUTS[args.organize]})")
+        print("  Songs you already downloaded stay where they are (and are still recognized).")
+        if not (args.format or args.downloads or args.db):
+            return
+
     if args.format:
         save_config({"audio_format": args.format})
         print(f"✔ Downloads will be saved as: {args.format}  ({AUDIO_FORMATS[args.format]})")
@@ -1547,7 +1674,7 @@ def cmd_config(args):
             print("  Note: ffmpeg is needed for " + ("converting to MP3" if args.format == "mp3"
                   else "clean files with cover art") + ". Install it:  " +
                   ("winget install Gyan.FFmpeg" if IS_WIN else "sudo apt install ffmpeg"))
-        if not (args.downloads or args.db):
+        if not (args.downloads or args.db or args.organize):
             return
 
     if args.downloads:
@@ -1588,6 +1715,7 @@ def cmd_config(args):
     print("Writable:      " + ("yes" if ok else f"NO (needs {need}; {how})"))
     print(f"Downloads:     {default_download_dir()}")
     print(f"Audio format:  {audio_format()}  ({AUDIO_FORMATS[audio_format()]})")
+    print(f"Organize:      {layout()}  ({LAYOUTS[layout()].split(':')[0].strip()})")
     print(f"Settings file: {config_file()}")
     if os.environ.get("RADIOLOG_DB"):
         print(f"Note: RADIOLOG_DB is set, so {os.environ['RADIOLOG_DB']} is used instead.")
@@ -1689,6 +1817,7 @@ def main():
             "  radiolog config --db \"D:\\My Music\\songs.db\"   use a specific file (quote spaces)\n"
             "  radiolog config --downloads D:\\Music          save downloads there from now on\n"
             "  radiolog config --format mp3                  download songs as .mp3 from now on\n"
+            "  radiolog config --organize genre-artist       downloads into Genre\\Artist folders\n"
             "  radiolog config --reset                       run the first-time setup again\n\n"
             "Settings file: %APPDATA%\\radiolog\\config.json (Linux: ~/.config/radiolog/config.json)."))
     c.add_argument("--db", metavar="LOCATION",
@@ -1698,6 +1827,9 @@ def main():
     c.add_argument("--downloads", metavar="FOLDER",
                    help="save future downloads in this folder (already downloaded files stay "
                         "where they are). Default: Music\\radiolog in your user folder")
+    c.add_argument("--organize", choices=list(LAYOUTS),
+                   help="how downloads are sorted into folders: flat (default, one folder), artist, "
+                        "genre, or genre-artist (genre, then artist)")
     c.add_argument("--format", choices=list(AUDIO_FORMATS),
                    help="audio format for downloads: best (default, original stream, usually "
                         ".opus), opus, m4a (no conversion) or mp3 (converted, plays everywhere)")
@@ -1712,6 +1844,10 @@ def main():
         sp.add_argument("--until", help="same formats as --since")
         sp.add_argument("--search", help="filter by artist or title text")
         sp.add_argument("-n", "--limit", type=int, default=None, help="max songs")
+        sp.add_argument("--genre", metavar="TEXT",
+                        help="only songs whose genre contains TEXT (rock, pop, rap…; looked up online once)")
+        sp.add_argument("--sort", choices=["time", "artist", "title", "genre"], default="time",
+                        help="order of the songs: time (default), artist, title or genre")
 
     k = sub.add_parser(
         "pick", help="choose songs from a list, then search or download them", formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1731,6 +1867,8 @@ def main():
             "  radiolog pick --search queen -n 50"))
     add_filters(k)
     k.add_argument("--dir", help="save downloads into this folder this time (setting unchanged)")
+    k.add_argument("--organize", choices=list(LAYOUTS),
+                   help="sort downloads into folders this time: flat, artist, genre or genre-artist")
 
     u = sub.add_parser(
         "update", help="update radiolog to the newest release from GitHub",
@@ -1803,7 +1941,9 @@ def main():
             "Several songs at once: give several numbers/ranges, or use filters to download\n"
             "everything matching (no 50-song limit). Repeats are downloaded once, songs you\n"
             "already have (in that format) are skipped, and you get a summary at the end.\n\n"
-            "Files go to the download folder from your settings (see: radiolog config)."),
+            "Files go to the download folder from your settings, sorted into artist/genre\n"
+            "folders if you chose that (radiolog config --organize). Each song gets\n"
+            "radiolog's artist, title and genre written into its tags."),
         epilog=(
             "examples:\n"
             "  radiolog download                     last song\n"
@@ -1813,12 +1953,17 @@ def main():
             "  radiolog download --since 3h -y       last 3 hours, without asking\n"
             "  radiolog download 12 --video\n"
             "  radiolog download 12 --format mp3     as .mp3 this time\n"
+            "  radiolog download --genre rock --sort artist   all rock songs, A-Z by artist\n"
+            "  radiolog download --today --organize genre     into genre folders this time\n"
             "  radiolog download 12 --print-cmd      only show the yt-dlp command"))
     d.add_argument("songs", nargs="*", metavar="SONG",
                    help="song numbers or ranges from 'show', e.g. 12  3 5 7  10-15 (default: last song)")
     add_filters(d)
     d.add_argument("--video", action="store_true", help="download the video instead of audio only")
     d.add_argument("--dir", help="save into this folder instead of the default")
+    d.add_argument("--organize", choices=list(LAYOUTS),
+                   help="sort into folders this time: flat, artist, genre or genre-artist "
+                        "(default: your setting, see radiolog config --organize)")
     d.add_argument("--print-cmd", action="store_true", help="only print the yt-dlp commands, don't run them")
     d.add_argument("-y", "--yes", action="store_true", help="don't ask before a batch download")
     d.add_argument("--force", action="store_true", help="download again even if the file already exists")
