@@ -20,6 +20,11 @@ Watching the system media session every 5s   (Ctrl+C to stop)
 [2026-10-19 01:26:03] Dżem — Wehikuł czasu
 ```
 
+**Contents:** [Features](#features) · [Requirements](#requirements) · [Install](#install) ·
+[Usage](#usage) · [Search or download](#search-or-download-a-song) · [Audio formats](#audio-formats) ·
+[Setup and settings](#setup-and-settings) · [Troubleshooting](#troubleshooting) ·
+[Update / Uninstall](#update--uninstall)
+
 ## Features
 
 - **Made for internet radio**: catches every song change on a station, even when the radio
@@ -46,18 +51,25 @@ Watching the system media session every 5s   (Ctrl+C to stop)
 
 ## Requirements
 
-- Python 3.8 or newer (the Windows installer can install it for you)
 - Windows 10/11, Linux or macOS
-  - System mode: Windows or Linux (`playerctl` on Linux)
+- Python 3.8 or newer (the Windows installer can install it for you)
+- For recording:
+  - System mode: Windows, or Linux with `playerctl`
   - Stream mode: any OS
+- For downloads: [yt-dlp](https://github.com/yt-dlp/yt-dlp) (installed automatically) and,
+  recommended, [ffmpeg](https://ffmpeg.org) for cover art, tags, MP3 and full-quality video
+  (the installer offers it)
 
 ## Install
 
 - **Windows:** double-click `install.bat`
 - **Linux / macOS:** run `./install.sh` in this folder
 
-The installer sets up everything, including the Windows components for system mode and
-yt-dlp for downloads. It offers to install ffmpeg too, and adds the `radiolog` command to your PATH. Then open a **new** terminal window.
+The installer sets up everything: the Windows components for system mode, yt-dlp for downloads,
+and the `radiolog` command on your PATH. It also offers to install ffmpeg (recommended).
+
+Then open a **new** terminal window and run any command, for example `radiolog show`. The first
+start asks where to store your song history and your downloads; see [First-time setup](#first-time-setup).
 
 ## Usage
 
@@ -106,13 +118,18 @@ radiolog pick --today --search queen
   #11  2026-10-19 01:22:16  Proletaryat — Hej naprzód marsz
   #12  2026-10-19 01:26:03  Dżem — Wehikuł czasu
 
-Song number [12] (q to quit): 12
+Tip: pick several at once, e.g.  3 5 8-12  or  all
+
+Song number(s) [12] (q to quit): 12
 
   ♪ Dżem - Wehikuł czasu
   [y] search on YouTube      [m] YouTube Music     [s] Spotify
-  [d] download audio         [v] download video    [c] show yt-dlp command
+  [d] download audio (best)  [v] download video    [c] show yt-dlp command
   [b] back to the list       [q] quit
 ```
+
+Press **Enter** to pick the latest song. After an action you stay in the menu; press **Enter** or
+**b** to go back to the list.
 
 Or directly, by number (leave the number out to use the last song):
 
@@ -120,6 +137,7 @@ Or directly, by number (leave the number out to use the last song):
 radiolog search 12                 # YouTube search in your browser
 radiolog search 12 --ytmusic       # YouTube Music
 radiolog search 12 --spotify       # Spotify
+radiolog download                  # the last song
 radiolog download 12               # best-quality audio
 radiolog download 12 --video       # best-quality video (saved as "… (video).mkv")
 radiolog download 12 --format mp3  # as .mp3 this time (see Audio formats below)
@@ -151,16 +169,11 @@ Downloads go to the folder you chose during the [first-time setup](#first-time-s
 (default: `Music\radiolog` in your user folder). Change it with `radiolog config --downloads FOLDER`,
 or use `--dir FOLDER` for a single download.
 
-**What "best quality" means here:** yt-dlp takes the best audio stream YouTube offers and saves it
-**without re-encoding** (usually `.opus` or `.m4a`), so no quality is lost, and adds tags and cover
-art. `--video` takes the best video and best audio streams and joins them into an `.mkv`.
-Without ffmpeg, the file is saved exactly as streamed, still at the best quality, but without
-cover art and tags. The installer offers to install ffmpeg, or run `winget install Gyan.FFmpeg`.
-
 ### Audio formats
 
-By default radiolog keeps the audio exactly as YouTube streams it, which is the best quality you can
-get. Choose another format if a device of yours can't play it:
+By default radiolog keeps the audio exactly as YouTube streams it, **without re-encoding**, so no
+quality is lost. That's the best you can get from YouTube. With ffmpeg installed it also adds the
+title, artist and cover art. Choose another format if a device of yours can't play the default:
 
 | Format | File | Quality | Plays on |
 |---|---|---|---|
@@ -180,6 +193,13 @@ stream itself. Pick `mp3` for compatibility, not for quality.
 
 Already-downloaded songs are skipped per format, so switching to `mp3` downloads MP3 versions of
 songs you only have as `.opus`.
+
+**Video** (`--video` or **[v]**) takes the best video and best audio streams and joins them into
+`Artist - Title (video).mkv`, again without re-encoding.
+
+**Without ffmpeg**, files are saved exactly as YouTube streams them: still the best quality, but
+without cover art and tags, `mp3` falls back to the original format, and video may be lower
+resolution. Install it with `winget install Gyan.FFmpeg` (Linux: `sudo apt install ffmpeg`).
 
 ### Notes
 
@@ -229,12 +249,13 @@ Settings file: C:\Users\you\AppData\Roaming\radiolog\config.json
 
 | Option | What it does |
 |---|---|
-| *(none)* | Show where the history and downloads are, how many songs are logged, and whether the history location is writable |
+| *(none)* | Show where the history and downloads are, the audio format, how many songs are logged, and whether the history location is writable |
 | `--db LOCATION` | Store the song history somewhere else: a folder or a full file path. Your existing history is moved there (radiolog asks first). If a history file already exists at the new place, radiolog switches to it and doesn't move anything. |
 | `--downloads FOLDER` | Save future downloads in this folder. Files you already downloaded stay where they are. |
 | `--format FORMAT` | Audio format for downloads: `best`, `opus`, `m4a` or `mp3`. See [Audio formats](#audio-formats). |
-| `--reset` | Forget both settings, so the first-time setup runs again on the next start. Your history file and downloaded songs are **not** deleted. |
+| `--reset` | Forget all settings (history location, download folder, audio format), so the first-time setup runs again on the next start. Your history file and downloaded songs are **not** deleted. |
 
+The audio format is set only here (default `best`); the first-time setup doesn't ask about it.
 Both locations are checked for write access. If one needs administrator rights, radiolog warns you
 and asks before saving it.
 
@@ -275,7 +296,17 @@ station's stream URL instead.
 **"A Windows component is missing"**: run `install.bat` again.
 
 **Download fails with an error**: YouTube changes often; updating yt-dlp usually fixes it.
-Run the installer again, or `py -m pip install --user -U yt-dlp`.
+Run the installer again, or `py -m pip install --user -U "yt-dlp[default]"`.
+
+**"Unable to embed thumbnail" / "module mutagen was not found"**: versions before 1.5 installed
+yt-dlp without its helper for cover art, so `.opus` downloads were reported as failed even though
+the song was saved. Run the installer from the latest version.
+
+**I chose `mp3` but got `.opus` files**: converting to MP3 needs ffmpeg. Install it
+(`winget install Gyan.FFmpeg`), open a new terminal and download again.
+
+**The download is the wrong song**: radiolog uses the first YouTube result for *Artist - Title*.
+Check with `radiolog search NUMBER` first, or download that video yourself with yt-dlp.
 
 **"radiolog can't write to its database"**: the database is in a location that needs administrator
 rights. Run radiolog from a terminal opened with *Run as administrator*, or move the history
@@ -283,7 +314,8 @@ somewhere you can write to with `radiolog config --db NEW_LOCATION`.
 
 ## Update / Uninstall
 
-- **Update:** replace the files and run the installer again.
+- **Update:** download the latest version from GitHub (*Code → Download ZIP*), unzip it over the
+  old folder and run the installer again. Your history, downloads and settings are kept.
 - **Uninstall:** double-click `uninstall.bat` (Windows) or run `./install.sh --uninstall`.
 
 ## How it works
@@ -293,3 +325,7 @@ somewhere you can write to with `radiolog config --db NEW_LOCATION`.
 - **Stream mode** opens the stream with the `Icy-MetaData: 1` header and reads the `StreamTitle`
   blocks that Shoutcast/Icecast servers insert between chunks of audio. The audio itself is discarded.
 - A new entry is saved only when the artist/title changes.
+- **Search** opens a YouTube, YouTube Music or Spotify search URL for *Artist - Title* in your browser.
+- **Download** runs yt-dlp with `ytsearch1:"Artist - Title"`, picks the best stream for the chosen
+  format, and (with ffmpeg) extracts the audio, adds tags and cover art. `--print-cmd` shows the
+  exact command.

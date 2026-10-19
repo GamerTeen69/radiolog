@@ -23,9 +23,11 @@ Browse
     radiolog show --today --csv today.csv
 
 Search and download (song numbers come from 'show'; no number = last song)
-    radiolog pick                        choose songs from a list, then search or download them
+    radiolog pick                        choose songs from a list (several: 3 5 8-12 or all),
+                                         then search or download them
     radiolog search 12 [--ytmusic | --spotify]
     radiolog download 12 [--video]       best quality via yt-dlp
+    radiolog download 12 --format mp3    audio as best (default) | opus | m4a | mp3, this time only
     radiolog download 3 5 8-12           batch: several numbers and ranges
     radiolog download --today            batch: everything heard today
 
@@ -34,7 +36,7 @@ Settings
     radiolog config --db LOCATION        move the song history (folder or file path)
     radiolog config --downloads FOLDER   change the download folder
     radiolog config --format mp3         download audio as best | opus | m4a | mp3
-    radiolog config --reset              forget both settings; setup runs again on next start
+    radiolog config --reset              forget all settings; setup runs again on next start
     Settings live in %APPDATA%\\radiolog\\config.json (Linux: ~/.config/radiolog/).
     The RADIOLOG_DB environment variable overrides the history location for one run.
 
@@ -816,7 +818,7 @@ def already_downloaded(folder, artist, title, video):
 
 
 YTDLP_MISSING = ("yt-dlp is not installed. Re-run the radiolog installer, or:\n"
-                 "  py -m pip install --user -U yt-dlp" if IS_WIN else
+                 "  py -m pip install --user -U \"yt-dlp[default]\"" if IS_WIN else
                  "yt-dlp is not installed. Re-run ./install.sh, or:  pipx install yt-dlp")
 
 
@@ -865,7 +867,8 @@ def download_song(artist, title, folder=None, video=False, print_only=False, qui
         return "ok"
     if not quiet_header:
         print(f"\n✖ yt-dlp stopped with an error (code {code}). If YouTube changed something,\n"
-              "  updating usually fixes it:  re-run the installer, or  py -m pip install -U yt-dlp")
+              "  updating usually fixes it: re-run the installer, or\n"
+              "  py -m pip install --user -U \"yt-dlp[default]\"")
     return "failed"
 
 
@@ -1131,7 +1134,21 @@ def main():
                "first start asks where to store your history and downloads; see radiolog config --help")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    w = sub.add_parser("watch", help="record songs as they play")
+    w = sub.add_parser(
+        "watch", help="record songs as they play", formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Record every song change, with the date and time it was first heard.\n"
+            "Leave it running in a terminal; stop with Ctrl+C.\n\n"
+            "  --system  reads what your computer reports as 'now playing' (the info in the\n"
+            "            Windows volume popup; Linux: MPRIS via playerctl). Works with browser\n"
+            "            radio, YouTube, Spotify, VLC and any player that reports the song.\n"
+            "  --url     reads song titles straight from a Shoutcast/Icecast radio stream\n"
+            "            (direct stream link, .pls or .m3u; not the station's web page)."),
+        epilog=(
+            "examples:\n"
+            "  radiolog watch --system\n"
+            "  radiolog watch --system --player chrome\n"
+            "  radiolog watch --url http://stream.example.com/radio.mp3"))
     mode = w.add_mutually_exclusive_group(required=True)
     mode.add_argument("--url", help="radio stream URL (direct stream, .pls or .m3u)")
     mode.add_argument("--system", action="store_true",
@@ -1141,12 +1158,27 @@ def main():
     w.add_argument("--encoding", default="auto",
                    help="stream mode: metadata text encoding (default auto = utf-8, then cp1250)")
 
-    s = sub.add_parser("show", help="display the logged songs")
+    s = sub.add_parser(
+        "show", help="display the logged songs", formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "List logged songs, oldest first, each with its number (#12) and the date and\n"
+            "time it was heard. Use the numbers with 'pick', 'search' and 'download'.\n"
+            "Without filters, shows the last 50 songs; with --today/--since/--until, all\n"
+            "matching songs."),
+        epilog=(
+            "time formats for --since / --until:\n"
+            "  30m  3h  2d  1w  today  yesterday  20:00  2026-10-18  \"2026-10-18 20:00\"\n\n"
+            "examples:\n"
+            "  radiolog show\n"
+            "  radiolog show --today\n"
+            "  radiolog show --since 3h --search queen\n"
+            "  radiolog show --since \"2026-10-18 20:00\" --until \"2026-10-18 23:00\"\n"
+            "  radiolog show --today --csv today.csv"))
     s.add_argument("--today", action="store_true", help="only songs from today")
     s.add_argument("--since", help="e.g. 3h, 2d, yesterday, 20:00, '2026-10-18 20:00'")
     s.add_argument("--until", help="same formats as --since")
     s.add_argument("--search", help="filter by artist or title text")
-    s.add_argument("-n", "--limit", type=int, default=None, help="max songs (default 50 without a time filter)")
+    s.add_argument("-n", "--limit", type=int, default=None, help="max songs (default: 50 without a time filter)")
     s.add_argument("--csv", metavar="FILE", help="export the selection to a CSV file instead of printing")
     s.add_argument("--no-source", action="store_true", help="hide the station/player column")
 
@@ -1183,8 +1215,9 @@ def main():
                    help="audio format for downloads: best (default, original stream, usually "
                         ".opus), opus, m4a (no conversion) or mp3 (converted, plays everywhere)")
     c.add_argument("--reset", action="store_true",
-                   help="forget both settings so the first-time setup runs again on the next "
-                        "start. Your history and downloaded songs are NOT deleted")
+                   help="forget all settings (history location, download folder, audio "
+                        "format) so the first-time setup runs again on the next start. Your "
+                        "history and downloaded songs are NOT deleted")
 
     def add_filters(sp):
         sp.add_argument("--today", action="store_true", help="only songs from today")
@@ -1193,11 +1226,34 @@ def main():
         sp.add_argument("--search", help="filter by artist or title text")
         sp.add_argument("-n", "--limit", type=int, default=None, help="max songs")
 
-    k = sub.add_parser("pick", help="choose a song from the list, then search or download it")
+    k = sub.add_parser(
+        "pick", help="choose songs from a list, then search or download them", formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Interactive menu. Shows the last 20 songs (or those matching the filters),\n"
+            "then asks for a song number: Enter picks the latest. Type several numbers or\n"
+            "ranges (3 5 8-12) or 'all' to select more than one.\n\n"
+            "For one song:   [y] YouTube  [m] YouTube Music  [s] Spotify\n"
+            "                [d] download audio  [v] download video  [c] show yt-dlp command\n"
+            "For several:    [d] download all (audio)  [v] all (video)  [c] show commands\n"
+            "Always:         [b] back to the list  [q] quit\n\n"
+            "Audio is saved in your chosen format (see: radiolog config --help)."),
+        epilog=(
+            "examples:\n"
+            "  radiolog pick\n"
+            "  radiolog pick --today\n"
+            "  radiolog pick --search queen -n 50"))
     add_filters(k)
-    k.add_argument("--dir", help="download folder for this time")
+    k.add_argument("--dir", help="save downloads into this folder this time (setting unchanged)")
 
-    f = sub.add_parser("search", help="search a song on YouTube or Spotify (opens the browser)")
+    f = sub.add_parser(
+        "search", help="search a song on YouTube or Spotify (opens the browser)", formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Open a search for a logged song (\"Artist - Title\") in your web browser.",
+        epilog=(
+            "examples:\n"
+            "  radiolog search              last song, on YouTube\n"
+            "  radiolog search 12           song #12, on YouTube\n"
+            "  radiolog search 12 --ytmusic\n"
+            "  radiolog search 12 --spotify"))
     f.add_argument("song", nargs="?", default="last", help="song number from 'show' (default: last song)")
     svc = f.add_mutually_exclusive_group()
     svc.add_argument("--yt", "--youtube", dest="service", action="store_const", const="youtube",
@@ -1206,7 +1262,28 @@ def main():
     svc.add_argument("--spotify", dest="service", action="store_const", const="spotify", help="Spotify")
     f.set_defaults(service="youtube")
 
-    d = sub.add_parser("download", help="download songs with yt-dlp in the best quality available")
+    d = sub.add_parser(
+        "download", help="download songs with yt-dlp in the best quality available", formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Find songs on YouTube (first result for \"Artist - Title\") and download them\n"
+            "with yt-dlp in the best quality available.\n\n"
+            "Audio is saved in your chosen format (default 'best': the original stream,\n"
+            "usually .opus, not converted), with tags and cover art when ffmpeg is installed.\n"
+            "--video saves the best video and audio joined into '... (video).mkv'.\n\n"
+            "Several songs at once: give several numbers/ranges, or use filters to download\n"
+            "everything matching (no 50-song limit). Repeats are downloaded once, songs you\n"
+            "already have (in that format) are skipped, and you get a summary at the end.\n\n"
+            "Files go to the download folder from your settings (see: radiolog config)."),
+        epilog=(
+            "examples:\n"
+            "  radiolog download                     last song\n"
+            "  radiolog download 12                  song #12\n"
+            "  radiolog download 3 5 8-12            several songs and a range\n"
+            "  radiolog download --today             everything heard today (asks first)\n"
+            "  radiolog download --since 3h -y       last 3 hours, without asking\n"
+            "  radiolog download 12 --video\n"
+            "  radiolog download 12 --format mp3     as .mp3 this time\n"
+            "  radiolog download 12 --print-cmd      only show the yt-dlp command"))
     d.add_argument("songs", nargs="*", metavar="SONG",
                    help="song numbers or ranges from 'show', e.g. 12  3 5 7  10-15 (default: last song)")
     add_filters(d)
