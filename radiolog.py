@@ -40,9 +40,10 @@ import ssl
 import subprocess
 import sys
 import time
+import webbrowser
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import quote, quote_plus, urljoin, urlsplit
 
 IS_WIN = sys.platform == "win32"
 DEFAULT_DB = Path.home() / ".radiolog.db"   # default: in the user folder (no admin rights needed)
@@ -71,7 +72,9 @@ def load_config():
         return {}
 
 
-def save_config(cfg):
+def save_config(changes):
+    cfg = load_config()
+    cfg.update(changes)
     path = config_file()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -537,9 +540,10 @@ def parse_when(text):
     raise SystemExit(f"Don't understand the time '{text}'. Use e.g. 3h, today, 2026-10-18 20:00")
 
 
-def cmd_show(args):
+def query_rows(args, default_limit=50):
+    """Songs matching the show/pick filters, oldest first: (id, played_at, artist, title, source)."""
     con = db_connect()
-    sql = "SELECT played_at, artist, title, source FROM plays WHERE 1=1"
+    sql = "SELECT id, played_at, artist, title, source FROM plays WHERE 1=1"
     params = []
     since = parse_when("today") if args.today else (parse_when(args.since) if args.since else None)
     if since:
@@ -548,15 +552,33 @@ def cmd_show(args):
         sql += " AND played_at <= ?"; params.append(parse_when(args.until).isoformat(timespec="seconds"))
     if args.search:
         sql += " AND (artist LIKE ? OR title LIKE ?)"; params += [f"%{args.search}%"] * 2
-    sql += " ORDER BY played_at DESC"
-    if not (since or args.until) or args.limit_given:
-        sql += " LIMIT ?"; params.append(args.limit)
-    rows = list(reversed(con.execute(sql, params).fetchall()))
+    sql += " ORDER BY played_at DESC, id DESC"
+    if not (since or args.until) or args.limit is not None:
+        sql += " LIMIT ?"; params.append(args.limit if args.limit is not None else default_limit)
+    return list(reversed(con.execute(sql, params).fetchall()))
+
+
+def print_rows(rows, show_source=True):
+    width = shutil.get_terminal_size((100, 20)).columns
+    num_w = len(str(max(r[0] for r in rows)))
+    print()
+    for song_id, played_at, artist, title, source in rows:
+        when = played_at.replace("T", " ")          # 2026-10-19 01:21:05
+        line = f"  #{song_id:<{num_w}}  {when}  {artist or '?'} — {title}"
+        if show_source and source:
+            line += f"   ({source})"
+        if len(line) > width:
+            line = line[: width - 1] + "…"
+        print(line)
+
+
+def cmd_show(args):
+    rows = query_rows(args)
 
     if args.csv:
         with open(args.csv, "w", newline="", encoding="utf-8-sig") as fh:
             w = csv.writer(fh)
-            w.writerow(["played_at", "artist", "title", "source"])
+            w.writerow(["id", "played_at", "artist", "title", "source"])
             w.writerows(rows)
         print(f"Wrote {len(rows)} songs to {args.csv}")
         return
@@ -565,17 +587,191 @@ def cmd_show(args):
         print("Nothing logged for that selection yet.")
         return
 
-    width = shutil.get_terminal_size((100, 20)).columns
-    print()
-    for played_at, artist, title, source in rows:
-        when = played_at.replace("T", " ")          # 2026-10-19 01:21:05
-        line = f"  {when}  {artist or '?'} — {title}"
-        if not args.no_source and source:
-            line += f"   ({source})"
-        if len(line) > width:
-            line = line[: width - 1] + "…"
-        print(line)
-    print(f"\n{len(rows)} song(s)")
+    print_rows(rows, not args.no_source)
+    print(f"\n{len(rows)} song(s)   ·   search/download one:  radiolog pick   or   radiolog download NUMBER")
+
+
+# --------------------------------------------------------------------------- search & download
+
+def get_song(ref):
+    """'last' or a song number (with or without #) -> (id, artist, title)."""
+    con = db_connect()
+    ref = (ref or "last").strip().lstrip("#").lower()
+    if ref == "last":
+        row = con.execute("SELECT id, artist, title FROM plays ORDER BY id DESC LIMIT 1").fetchone()
+        if not row:
+            raise SystemExit("Nothing logged yet.")
+        return row
+    if not ref.isdigit():
+        raise SystemExit(f"'{ref}' is not a song number. Use the # number from 'radiolog show', or 'last'.")
+    row = con.execute("SELECT id, artist, title FROM plays WHERE id = ?", (int(ref),)).fetchone()
+    if not row:
+        raise SystemExit(f"There's no song #{ref}. See the numbers with:  radiolog show")
+    return row
+
+
+def song_query(artist, title):
+    return f"{artist} - {title}" if artist else title
+
+
+def search_url(service, artist, title):
+    q = song_query(artist, title)
+    if service == "spotify":
+        return "https://open.spotify.com/search/" + quote(q, safe="")
+    if service == "ytmusic":
+        return "https://music.youtube.com/search?q=" + quote_plus(q)
+    return "https://www.youtube.com/results?search_query=" + quote_plus(q)
+
+
+SERVICE_NAMES = {"youtube": "YouTube", "ytmusic": "YouTube Music", "spotify": "Spotify"}
+
+
+def open_search(service, artist, title):
+    url = search_url(service, artist, title)
+    print(f"Opening {SERVICE_NAMES[service]}: {song_query(artist, title)}")
+    if not webbrowser.open(url):
+        print(f"Couldn't open a browser. Here's the link:\n  {url}")
+
+
+def default_download_dir():
+    saved = load_config().get("download_dir")
+    return Path(saved) if saved else Path.home() / "Music" / "radiolog"
+
+
+def safe_filename(text):
+    text = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", text).strip(" .")
+    return text[:150] or "song"
+
+
+def ytdlp_base():
+    """How to start yt-dlp: the Python module installed with radiolog, else a yt-dlp on PATH."""
+    try:
+        import yt_dlp  # noqa: F401
+        return [sys.executable, "-m", "yt_dlp"]
+    except ImportError:
+        exe = shutil.which("yt-dlp")
+        if exe:
+            return [exe]
+    return None
+
+
+def build_ytdlp_cmd(artist, title, folder, video=False, have_ffmpeg=True):
+    """yt-dlp command that finds the song on YouTube and downloads the best quality available."""
+    name = safe_filename(song_query(artist, title))
+    cmd = ["--no-playlist", "--paths", str(folder), "-o", f"{name}.%(ext)s"]
+    if video and have_ffmpeg:
+        # best video + best audio streams, merged into .mkv (holds any codec, no re-encoding)
+        cmd += ["-f", "bv*+ba/b", "--merge-output-format", "mkv"]
+    elif video:
+        cmd += ["-f", "b"]          # best file that already has video and audio together
+    elif have_ffmpeg:
+        # best audio stream, extracted WITHOUT re-encoding (keeps the original quality: opus/m4a)
+        cmd += ["-f", "ba/b", "-x", "--audio-quality", "0"]
+    else:
+        cmd += ["-f", "ba/b"]
+    if have_ffmpeg:
+        cmd += ["--embed-metadata", "--embed-thumbnail"]
+    cmd.append("ytsearch1:" + song_query(artist, title).replace('"', ""))
+    return cmd
+
+
+def show_cmd(cmd):
+    """The command as you could paste it into a terminal (cmd/PowerShell on Windows, sh elsewhere)."""
+    if IS_WIN:
+        return subprocess.list2cmdline(cmd)
+    import shlex
+    return " ".join(shlex.quote(c) for c in cmd)
+
+
+def download_song(artist, title, folder=None, video=False, print_only=False):
+    folder = Path(folder).expanduser() if folder else default_download_dir()
+    have_ffmpeg = bool(shutil.which("ffmpeg"))
+    cmd = build_ytdlp_cmd(artist, title, folder, video, have_ffmpeg)
+    base = ytdlp_base()
+
+    if print_only:
+        print(show_cmd(["yt-dlp"] + cmd))
+        return
+    if not base:
+        print("yt-dlp is not installed. Re-run the radiolog installer, or:\n"
+              "  py -m pip install --user -U yt-dlp" if IS_WIN else
+              "yt-dlp is not installed. Re-run ./install.sh, or:  pipx install yt-dlp")
+        print("\nThe command it would run:\n  " + show_cmd(["yt-dlp"] + cmd))
+        return
+    if not have_ffmpeg:
+        print("Note: ffmpeg was not found, so the file is saved exactly as YouTube streams it\n"
+              "      (still the best quality, but without cover art/tags" +
+              (", and video without merging)." if video else ")."))
+        print("      Install it for the full result:  " +
+              ("winget install Gyan.FFmpeg" if IS_WIN else "sudo apt install ffmpeg") + "\n")
+
+    folder.mkdir(parents=True, exist_ok=True)
+    print(f"Downloading: {song_query(artist, title)}   ({'video' if video else 'audio'}, best quality)")
+    print(f"Into:        {folder}")
+    print(f"Command:     {show_cmd(['yt-dlp'] + cmd)}\n")
+    code = subprocess.call(base + cmd)
+    if code == 0:
+        print(f"\n✔ Done. Saved in {folder}")
+    else:
+        print(f"\n✖ yt-dlp stopped with an error (code {code}). If YouTube changed something,\n"
+              "  updating usually fixes it:  re-run the installer, or  py -m pip install -U yt-dlp")
+
+
+def cmd_search(args):
+    _, artist, title = get_song(args.song)
+    open_search(args.service, artist, title)
+
+
+def cmd_download(args):
+    _, artist, title = get_song(args.song)
+    download_song(artist, title, args.dir, args.video, args.print_cmd)
+
+
+def cmd_pick(args):
+    rows = query_rows(args, default_limit=20)
+    if not rows:
+        print("Nothing logged for that selection yet.")
+        return
+    print_rows(rows, show_source=False)
+    ids = {r[0]: r for r in rows}
+    default = str(rows[-1][0])
+    try:
+        while True:
+            choice = ask(f"\nSong number [{default}] (q to quit): ", default).lstrip("#").lower()
+            if choice in ("q", "quit", "exit"):
+                return
+            if not choice.isdigit():
+                print("  Type the number shown after #.")
+                continue
+            if int(choice) in ids:
+                song_id, _, artist, title, _ = ids[int(choice)]
+            else:
+                song_id, artist, title = get_song(choice)
+            print(f"\n  ♪ {song_query(artist, title)}\n"
+                  "  [y] search on YouTube      [m] YouTube Music     [s] Spotify\n"
+                  "  [d] download audio         [v] download video    [c] show yt-dlp command\n"
+                  "  [b] back to the list       [q] quit")
+            while True:
+                action = ask("  Action: ", "").lower()
+                if action == "y":
+                    open_search("youtube", artist, title)
+                elif action == "m":
+                    open_search("ytmusic", artist, title)
+                elif action == "s":
+                    open_search("spotify", artist, title)
+                elif action in ("d", "v"):
+                    print()
+                    download_song(artist, title, args.dir, video=(action == "v"))
+                elif action == "c":
+                    download_song(artist, title, args.dir, print_only=True)
+                elif action in ("b", ""):
+                    break
+                elif action == "q":
+                    return
+                else:
+                    print("  Choose y, m, s, d, v, c, b or q.")
+    except KeyboardInterrupt:
+        print()
 
 
 # --------------------------------------------------------------------------- config
@@ -586,9 +782,16 @@ def cmd_config(args):
             config_file().unlink()
         except FileNotFoundError:
             pass
-        print("Setting cleared. radiolog will ask where to store the database next time it starts.\n"
+        print("Settings cleared. radiolog will ask where to store the database next time it starts.\n"
               "(Your existing history file was not touched.)")
         return
+
+    if args.downloads:
+        folder = Path(os.path.expandvars(os.path.expanduser(args.downloads.strip().strip('"')))).resolve()
+        save_config({"download_dir": str(folder)})
+        print(f"✔ Downloads will be saved in:\n  {folder}")
+        if not args.db:
+            return
 
     current = Path(load_config().get("db_path") or DEFAULT_DB)
     if args.db:
@@ -611,6 +814,7 @@ def cmd_config(args):
     print(f"Database:      {current}")
     print("Songs logged:  " + (str(count_songs(current)) if current.exists() else "0 (file not created yet)"))
     print("Writable:      " + ("yes" if ok else f"NO (needs {need}; {how})"))
+    print(f"Downloads:     {default_download_dir()}")
     print(f"Settings file: {config_file()}")
     if os.environ.get("RADIOLOG_DB"):
         print(f"Note: RADIOLOG_DB is set, so {os.environ['RADIOLOG_DB']} is used instead.")
@@ -643,7 +847,34 @@ def main():
 
     c = sub.add_parser("config", help="show or change where the song history is stored")
     c.add_argument("--db", metavar="LOCATION", help="new folder or file for the database (history is moved)")
-    c.add_argument("--reset", action="store_true", help="forget the setting; ask again on next start")
+    c.add_argument("--downloads", metavar="FOLDER", help="where 'download' saves songs (default: Music\\radiolog)")
+    c.add_argument("--reset", action="store_true", help="forget the settings; ask again on next start")
+
+    def add_filters(sp):
+        sp.add_argument("--today", action="store_true", help="only songs from today")
+        sp.add_argument("--since", help="e.g. 3h, 2d, yesterday, 20:00, '2026-10-18 20:00'")
+        sp.add_argument("--until", help="same formats as --since")
+        sp.add_argument("--search", help="filter by artist or title text")
+        sp.add_argument("-n", "--limit", type=int, default=None, help="max songs")
+
+    k = sub.add_parser("pick", help="choose a song from the list, then search or download it")
+    add_filters(k)
+    k.add_argument("--dir", help="download folder for this time")
+
+    f = sub.add_parser("search", help="search a song on YouTube or Spotify (opens the browser)")
+    f.add_argument("song", nargs="?", default="last", help="song number from 'show' (default: last song)")
+    svc = f.add_mutually_exclusive_group()
+    svc.add_argument("--yt", "--youtube", dest="service", action="store_const", const="youtube",
+                     help="YouTube (default)")
+    svc.add_argument("--ytmusic", dest="service", action="store_const", const="ytmusic", help="YouTube Music")
+    svc.add_argument("--spotify", dest="service", action="store_const", const="spotify", help="Spotify")
+    f.set_defaults(service="youtube")
+
+    d = sub.add_parser("download", help="download a song with yt-dlp in the best quality available")
+    d.add_argument("song", nargs="?", default="last", help="song number from 'show' (default: last song)")
+    d.add_argument("--video", action="store_true", help="download the video instead of audio only")
+    d.add_argument("--dir", help="save into this folder instead of the default")
+    d.add_argument("--print-cmd", action="store_true", help="only print the yt-dlp command, don't run it")
 
     args = p.parse_args()
 
@@ -659,6 +890,15 @@ def main():
             cmd_config(args)
             return
         DB_PATH = resolve_db_path()
+        if args.cmd == "pick":
+            cmd_pick(args)
+            return
+        if args.cmd == "search":
+            cmd_search(args)
+            return
+        if args.cmd == "download":
+            cmd_download(args)
+            return
         if args.cmd == "watch":
             rec = Recorder(db_connect())
             print(f"Saving to {DB_PATH}")
@@ -667,9 +907,6 @@ def main():
             else:
                 watch_system(rec, args.interval, args.player)
         else:
-            args.limit_given = args.limit is not None
-            if args.limit is None:
-                args.limit = 50
             cmd_show(args)
     except KeyboardInterrupt:
         print("\nStopped.")

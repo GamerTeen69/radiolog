@@ -138,8 +138,32 @@ def add_to_path_unix(directory):
     return changed
 
 
+def offer_ffmpeg():
+    """yt-dlp needs ffmpeg for audio extraction, cover art and merging video. Offer to install it."""
+    import shutil
+    if shutil.which("ffmpeg"):
+        return
+    say("\nffmpeg is not installed. 'radiolog download' works without it, but with ffmpeg it")
+    say("adds cover art and tags, and saves clean audio files and full-quality video.")
+    if IS_WIN and shutil.which("winget") and sys.stdin.isatty():
+        try:
+            answer = input("Install ffmpeg now with winget? [Y/n]: ").strip().lower()
+        except EOFError:
+            answer = "n"
+        if answer in ("", "y", "yes", "t", "tak"):
+            code, _ = run(["winget", "install", "-e", "--id", "Gyan.FFmpeg",
+                           "--accept-package-agreements", "--accept-source-agreements"])
+            say("✔ ffmpeg installed (open a new terminal to use it)." if code == 0 else
+                "✖ ffmpeg install failed; you can try later:  winget install Gyan.FFmpeg")
+            return
+    hint = ("winget install Gyan.FFmpeg" if IS_WIN else
+            "brew install ffmpeg" if sys.platform == "darwin" else "sudo apt install ffmpeg")
+    say(f"You can install it any time with:  {hint}")
+
+
 def install(fix_path=True):
     method = pip_install()
+    offer_ffmpeg()
     say()
     if method == "pipx":
         say("✔ radiolog installed with pipx.")

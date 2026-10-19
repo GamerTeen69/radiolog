@@ -33,6 +33,9 @@ Watching the system media session every 5s   (Ctrl+C to stop)
 - **Full history with timestamps**: every song is saved with the date and time it was
   first discovered; repeats of the same song are skipped.
 - **Search and filter**: by day, time range or text (`--today`, `--since 3h`, `--search queen`).
+- **Find it again**: open any logged song in a YouTube, YouTube Music or Spotify search with one command.
+- **Download in the best quality available** with a ready-made [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+  command: best audio stream with no re-encoding, cover art and tags (or the full video).
 - **CSV export** that opens cleanly in Excel.
 - **Handles Polish and other non-English titles**, including stations that send
   Windows-1250 text instead of UTF-8.
@@ -51,8 +54,8 @@ Watching the system media session every 5s   (Ctrl+C to stop)
 - **Windows:** double-click `install.bat`
 - **Linux / macOS:** run `./install.sh` in this folder
 
-The installer sets up everything, including the Windows components for system mode,
-and adds the `radiolog` command to your PATH. Then open a **new** terminal window.
+The installer sets up everything, including the Windows components for system mode and
+yt-dlp for downloads. It offers to install ffmpeg too, and adds the `radiolog` command to your PATH. Then open a **new** terminal window.
 
 ## Usage
 
@@ -86,6 +89,52 @@ radiolog show --today --csv today.csv            # export to a spreadsheet
 | `-n`, `--limit N` | maximum number of songs |
 | `--csv FILE` | save the selection as CSV instead of printing |
 | `--no-source` | hide the station / player name |
+
+Every song has a number (`#12`), which the commands below use.
+
+### Search or download a song
+
+The easiest way is the interactive menu: pick a song from the list, then choose what to do.
+
+```
+radiolog pick                      # last 20 songs (accepts the same filters as show)
+radiolog pick --today --search queen
+```
+```
+  #11  2026-10-19 01:22:16  Proletaryat — Hej naprzód marsz
+  #12  2026-10-19 01:26:03  Dżem — Wehikuł czasu
+
+Song number [12] (q to quit): 12
+
+  ♪ Dżem - Wehikuł czasu
+  [y] search on YouTube      [m] YouTube Music     [s] Spotify
+  [d] download audio         [v] download video    [c] show yt-dlp command
+  [b] back to the list       [q] quit
+```
+
+Or directly, by number (leave the number out to use the last song):
+
+```
+radiolog search 12                 # YouTube search in your browser
+radiolog search 12 --ytmusic       # YouTube Music
+radiolog search 12 --spotify       # Spotify
+radiolog download 12               # best-quality audio
+radiolog download 12 --video       # best-quality video
+radiolog download 12 --print-cmd   # just print the yt-dlp command to copy
+radiolog download 12 --dir D:\Music
+```
+
+Downloads go to `Music\radiolog` in your user folder. Change it with
+`radiolog config --downloads D:\Music`.
+
+**What "best quality" means here:** yt-dlp takes the best audio stream YouTube offers and saves it
+**without re-encoding** (usually `.opus` or `.m4a`), so no quality is lost, and adds tags and cover
+art. `--video` takes the best video and best audio streams and joins them into an `.mkv`.
+Without ffmpeg, the file is saved exactly as streamed, still at the best quality, but without
+cover art and tags. The installer offers to install ffmpeg, or run `winget install Gyan.FFmpeg`.
+
+Downloads use the first YouTube search result for *Artist - Title*. Please respect copyright and
+YouTube's terms in your country.
 
 ## Where the data lives
 
@@ -133,6 +182,9 @@ you play in the browser, use `radiolog watch --system`, or find the station's di
 station's stream URL instead.
 
 **"A Windows component is missing"**: run `install.bat` again.
+
+**Download fails with an error**: YouTube changes often; updating yt-dlp usually fixes it.
+Run the installer again, or `py -m pip install --user -U yt-dlp`.
 
 **"radiolog can't write to its database"**: the database is in a location that needs administrator
 rights. Run radiolog from a terminal opened with *Run as administrator*, or move the history
