@@ -1209,7 +1209,9 @@ def cmd_clear(args):
 # --------------------------------------------------------------------------- update
 
 def version_tuple(v):
-    return tuple(int(x) for x in re.findall(r"\d+", v or "")[:3]) or (0,)
+    """'v1.6.2' -> (1, 6, 2, 0); a 4th number (e.g. 1.6.2.1 / .post1) counts as newer."""
+    nums = [int(x) for x in re.findall(r"\d+", v or "")[:4]]
+    return tuple(nums + [0] * (4 - len(nums))) if nums else (0, 0, 0, 0)
 
 
 def latest_release():

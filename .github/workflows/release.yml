@@ -1,7 +1,8 @@
 # Publishes a GitHub release automatically when a commit on main changes the version.
 #
 # To release:  bump `version` in pyproject.toml (e.g. 1.5.2 -> 1.6.0), optionally add
-# release-notes/<version>.md with the release description, commit and push.
+# release-notes/<version>.md with the release description (and release-notes/<version>.title
+# for a custom title), commit and push.
 # If the tag v<version> already exists, nothing happens.
 name: Release
 
@@ -48,8 +49,12 @@ jobs:
           else
             NOTES=(--generate-notes)
           fi
+          TITLE="radiolog $VERSION"
+          if [ -f "release-notes/$VERSION.title" ]; then
+            TITLE=$(head -n1 "release-notes/$VERSION.title")
+          fi
           gh release create "v$VERSION" "radiolog-$VERSION.zip" \
-            --title "radiolog $VERSION" \
+            --title "$TITLE" \
             --target "$GITHUB_SHA" \
             --latest \
             "${NOTES[@]}"
