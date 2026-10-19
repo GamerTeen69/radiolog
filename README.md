@@ -293,9 +293,14 @@ YouTube's terms in your country.
 
 ## Spotify playlists
 
-Put songs from your history into playlists in your Spotify account:
+Put songs from your history into playlists in your Spotify account.
+
+The simplest one, like Shazam's playlist: **`radiolog playlist`** with nothing else puts **all** your
+songs into one playlist called **radiolog**. Run it again whenever you like; only the songs heard since
+are added.
 
 ```
+radiolog playlist                                  # everything, in a playlist called "radiolog"
 radiolog playlist --all                            # every song in your history ("radiolog · All songs")
 radiolog playlist --today                          # today's songs
 radiolog playlist 3 5 8-12 --name "Road trip"      # chosen songs

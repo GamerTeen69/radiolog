@@ -41,7 +41,8 @@ Clear the history (asks first, saves a backup; downloads are not touched)
     radiolog clear --until 30d           delete songs older than 30 days
 
 Spotify playlists (needs Premium + a one-time setup: radiolog playlist --setup)
-    radiolog playlist --all              every song in your history into a playlist
+    radiolog playlist                    ALL your songs into a playlist called "radiolog" (run again to update)
+    radiolog playlist --all              the same, as "radiolog · All songs"
     radiolog playlist --today            today's songs into a playlist
     radiolog playlist --genre rock --name "Radio rock"
     radiolog playlist --by genre         one playlist per genre (or --by artist)
@@ -1660,14 +1661,17 @@ def cmd_playlist(args):
     if not load_config().get("spotify_client_id"):
         import radiolog_spotify as sp
         raise SystemExit(sp.SETUP_HELP)
+    if not args.songs and not has_filters(args) and args.limit is None:
+        # plain 'radiolog playlist': everything you've heard, in one playlist called "radiolog"
+        # (like Shazam's "My Shazam Tracks"); running it again just adds the new songs
+        args.all = True
+        if not args.name and not args.by:
+            args.name = "radiolog"
     if args.songs:
         songs = songs_from_ids(parse_song_refs(args.songs))
     else:
         rows, _ = select_rows(args, default_limit=50)
         songs = [(r[0], r[2], r[3]) for r in rows]
-        if not has_filters(args) and args.limit is None:
-            print(f"(no selection given: using your last {len(songs)} songs; "
-                  "use --today, --genre, song numbers… to choose)")
     songs = unique_songs(songs)
     if not songs:
         print("No songs match.")
@@ -2144,7 +2148,9 @@ def main():
         "playlist", help="create Spotify playlists from your songs (all, chosen, by genre or by artist)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
-            "Put logged songs into a Spotify playlist in your account. Each song is found on\n"
+            "Put logged songs into a Spotify playlist in your account. Without any options,\n"
+            "ALL your songs go into one playlist called \"radiolog\" (like Shazam's playlist);\n"
+            "run it again any time to add the songs heard since. Each song is found on\n"
             "Spotify (remembered for next time); songs Spotify doesn't have are listed at the end.\n\n"
             "If a playlist with that name already exists in your account, the new songs are\n"
             "added to it (no duplicates), so running the same command again keeps it up to date.\n"
@@ -2153,7 +2159,8 @@ def main():
             "  radiolog playlist --setup"),
         epilog=(
             "examples:\n"
-            "  radiolog playlist --all                          every song in your history\n"
+            "  radiolog playlist                                everything, in a playlist called \"radiolog\"\n"
+            "  radiolog playlist --all                          everything, as \"radiolog · All songs\"\n"
             "  radiolog playlist --today                        today's songs\n"
             "  radiolog playlist 3 5 8-12 --name \"Road trip\"     chosen songs\n"
             "  radiolog playlist --genre rock --name \"Radio rock\"\n"
