@@ -21,6 +21,9 @@ Browse
     radiolog show --today | --since 3h | --since "2026-10-18 20:00" --until 23:00
     radiolog show --search queen
     radiolog show --today --csv today.csv
+    radiolog show --sort artist --unique each song once, A-Z by artist, with play counts
+    radiolog show --sort genre           grouped by genre (looked up online once per song)
+    radiolog show --genre rock           only rock songs
 
 Search and download (song numbers come from 'show'; no number = last song)
     radiolog pick                        choose songs from a list (several: 3 5 8-12 or all),
@@ -339,6 +342,14 @@ def db_connect():
            )"""
     )
     con.execute("CREATE INDEX IF NOT EXISTS idx_played_at ON plays(played_at)")
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS genres (
+               song_key   TEXT PRIMARY KEY,   -- lower(artist) + '\x1f' + lower(title)
+               genre      TEXT,               -- '' = looked up, nothing found
+               source     TEXT,               -- deezer / itunes
+               checked_at TEXT
+           )"""
+    )
     return con
 
 
@@ -652,13 +663,16 @@ def query_rows(args, default_limit=50):
     return list(reversed(con.execute(sql, params).fetchall()))
 
 
-def print_rows(rows, show_source=True):
+def print_rows(rows, show_source=True, extra=None, blank=True):
     width = shutil.get_terminal_size((100, 20)).columns
     num_w = len(str(max(r[0] for r in rows)))
-    print()
+    if blank:
+        print()
     for song_id, played_at, artist, title, source in rows:
         when = played_at.replace("T", " ")          # 2026-10-19 01:21:05
         line = f"  #{song_id:<{num_w}}  {when}  {artist or '?'} — {title}"
+        if extra and song_id in extra:
+            line += extra[song_id]
         if show_source and source:
             line += f"   ({source})"
         if len(line) > width:
@@ -666,23 +680,206 @@ def print_rows(rows, show_source=True):
         print(line)
 
 
+# --------------------------------------------------------------------------- genres
+
+def song_key(artist, title):
+    return f"{(artist or '').strip().lower()}\x1f{(title or '').strip().lower()}"
+
+
+def _get_json(url, timeout=10):
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+class GenreLookup:
+    """Finds a song's genre in free music databases (Deezer, then iTunes). No account needed."""
+
+    def __init__(self):
+        self.album_genre = {}          # Deezer album id -> genre (albums repeat a lot)
+        self._last_deezer = 0.0
+        self._last_itunes = 0.0
+
+    def _wait(self, attr, gap):
+        delay = getattr(self, attr) + gap - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+        setattr(self, attr, time.monotonic())
+
+    def deezer(self, artist, title):
+        queries = []
+        if artist:
+            queries.append(f'artist:"{artist}" track:"{title}"')
+        queries.append(f"{artist} {title}".strip())
+        for q in queries:
+            self._wait("_last_deezer", 0.12)              # Deezer allows 50 requests / 5 s
+            res = _get_json("https://api.deezer.com/search?limit=1&q=" + quote(q))
+            if res.get("error"):
+                if "quota" in str(res["error"]).lower():
+                    time.sleep(5)
+                continue
+            data = res.get("data") or []
+            if not data:
+                continue
+            album_id = (data[0].get("album") or {}).get("id")
+            if not album_id:
+                continue
+            if album_id not in self.album_genre:
+                self._wait("_last_deezer", 0.12)
+                album = _get_json(f"https://api.deezer.com/album/{album_id}")
+                names = [g.get("name") for g in ((album.get("genres") or {}).get("data") or []) if g.get("name")]
+                self.album_genre[album_id] = names[0] if names else ""
+            if self.album_genre[album_id]:
+                return self.album_genre[album_id]
+        return ""
+
+    def itunes(self, artist, title):
+        self._wait("_last_itunes", 3.1)                   # iTunes allows ~20 requests / minute
+        res = _get_json("https://itunes.apple.com/search?entity=song&limit=1&term=" +
+                        quote_plus(f"{artist} {title}".strip()))
+        results = res.get("results") or []
+        return (results[0].get("primaryGenreName") or "") if results else ""
+
+    def find(self, artist, title):
+        """(genre, source). Raises OSError when offline."""
+        g = self.deezer(artist, title)
+        if g:
+            return g, "deezer"
+        g = self.itunes(artist, title)
+        return (g, "itunes") if g else ("", "")
+
+
+def genres_for(rows, refresh=False):
+    """{song id: genre} for the given rows, looking up songs not seen before.
+    Results are remembered in the database, so each song is looked up only once."""
+    con = db_connect()
+    keys = {r[0]: song_key(r[2], r[3]) for r in rows}
+    cache = {}
+    unique = list(dict.fromkeys(keys.values()))
+    for i in range(0, len(unique), 500):
+        part = unique[i:i + 500]
+        for k, g, checked in con.execute(
+                f"SELECT song_key, genre, checked_at FROM genres WHERE song_key IN ({','.join('?' * len(part))})", part):
+            # songs where nothing was found are retried after 30 days
+            stale = not g and (not checked or datetime.now() - datetime.fromisoformat(checked) > timedelta(days=30))
+            if not refresh and not stale:
+                cache[k] = g
+
+    todo = []
+    for r in rows:
+        k = keys[r[0]]
+        if k not in cache and k not in {song_key(a, b) for a, b in todo}:
+            todo.append((r[2], r[3]))
+    if todo:
+        lookup = GenreLookup()
+        print(f"Looking up genres for {len(todo)} song(s) (first time only)… Ctrl+C to skip the rest.",
+              flush=True)
+        done = 0
+        try:
+            for artist, title in todo:
+                try:
+                    genre, source = lookup.find(artist, title)
+                except (OSError, ValueError) as e:
+                    print(f"\nCouldn't reach the music databases ({e}). Showing the genres found so far.")
+                    break
+                k = song_key(artist, title)
+                cache[k] = genre
+                con.execute("INSERT OR REPLACE INTO genres (song_key, genre, source, checked_at) VALUES (?,?,?,?)",
+                            (k, genre, source, datetime.now().isoformat(timespec="seconds")))
+                con.commit()
+                done += 1
+                if sys.stdout.isatty():
+                    print(f"\r  {done}/{len(todo)}  {(artist + ' — ' + title)[:50]:50}", end="", flush=True)
+        except KeyboardInterrupt:
+            print("\n(skipped the rest; they'll be looked up next time)")
+        if sys.stdout.isatty():
+            print("\r" + " " * 70 + "\r", end="")
+    return {rid: cache.get(k, "") for rid, k in keys.items()}
+
+
+def sort_key_text(s):
+    """Case-insensitive, ignores a leading 'The ' (The Hives sorts under H)."""
+    s = (s or "").strip().lower()
+    return s[4:] if s.startswith("the ") else s
+
+
 def cmd_show(args):
+    sorting = args.sort != "time" or args.genre or args.unique
+    if sorting and args.limit is None and not (args.today or args.since or args.until):
+        args.limit = 10 ** 9            # sorted/grouped views cover the whole history by default
     rows = query_rows(args)
+
+    genres = {}
+    if (args.sort == "genre" or args.genre or args.with_genre) and rows:
+        genres = genres_for(rows, refresh=args.refresh_genres)
+        if args.genre:
+            want = args.genre.lower()
+            rows = [r for r in rows if want in (genres.get(r[0]) or "").lower()]
+
+    counts = {}
+    if args.unique:                     # one line per song, newest play, with a play count
+        latest = {}
+        for r in rows:
+            k = song_key(r[2], r[3])
+            counts[k] = counts.get(k, 0) + 1
+            latest[k] = r
+        rows = sorted(latest.values(), key=lambda r: r[1])
+
+    if args.sort == "artist":
+        rows.sort(key=lambda r: (sort_key_text(r[2]), sort_key_text(r[3]), r[1]))
+    elif args.sort == "title":
+        rows.sort(key=lambda r: (sort_key_text(r[3]), sort_key_text(r[2]), r[1]))
+    elif args.sort == "genre":
+        rows.sort(key=lambda r: (genres.get(r[0]) == "", (genres.get(r[0]) or "").lower(),
+                                 sort_key_text(r[2]), sort_key_text(r[3]), r[1]))
 
     if args.csv:
         with open(args.csv, "w", newline="", encoding="utf-8-sig") as fh:
             w = csv.writer(fh)
-            w.writerow(["id", "played_at", "artist", "title", "source"])
-            w.writerows(rows)
+            header = ["id", "played_at", "artist", "title", "source"]
+            if genres:
+                header.append("genre")
+            if counts:
+                header.append("plays")
+            w.writerow(header)
+            for r in rows:
+                line = list(r)
+                if genres:
+                    line.append(genres.get(r[0], ""))
+                if counts:
+                    line.append(counts[song_key(r[2], r[3])])
+                w.writerow(line)
         print(f"Wrote {len(rows)} songs to {args.csv}")
         return
 
     if not rows:
-        print("Nothing logged for that selection yet.")
+        print("Nothing logged for that selection yet." if not args.genre
+              else f"No songs with a genre matching '{args.genre}'.")
         return
 
-    print_rows(rows, not args.no_source)
-    print(f"\n{len(rows)} song(s)   ·   search/download one:  radiolog pick   or   radiolog download NUMBER")
+    extra = {}
+    for r in rows:
+        bits = []
+        if counts and counts[song_key(r[2], r[3])] > 1:
+            bits.append(f"×{counts[song_key(r[2], r[3])]}")
+        if genres and args.sort != "genre" and genres.get(r[0]):
+            bits.append(f"[{genres[r[0]]}]")
+        if bits:
+            extra[r[0]] = "  " + " ".join(bits)
+
+    if args.sort == "genre":
+        groups = {}
+        for r in rows:
+            groups.setdefault(genres.get(r[0]) or "", []).append(r)
+        for g, members in groups.items():
+            label = g or "Unknown genre"
+            print(f"\n── {label} ({len(members)}) " + "─" * max(2, 40 - len(label)))
+            print_rows(members, not args.no_source, extra=extra, blank=False)
+    else:
+        print_rows(rows, not args.no_source, extra=extra)
+    what = "song(s)" if not args.unique else "different song(s)"
+    print(f"\n{len(rows)} {what}   ·   search/download one:  radiolog pick   or   radiolog download NUMBER")
 
 
 # --------------------------------------------------------------------------- search & download
@@ -1438,7 +1635,11 @@ def main():
             "List logged songs, oldest first, each with its number (#12) and the date and\n"
             "time it was heard. Use the numbers with 'pick', 'search' and 'download'.\n"
             "Without filters, shows the last 50 songs; with --today/--since/--until, all\n"
-            "matching songs."),
+            "matching songs. --sort, --genre and --unique cover the whole history unless you\n"
+            "add a time filter or -n.\n\n"
+            "Genres: radios and players don't send a genre, so radiolog looks each song up\n"
+            "in free music databases (Deezer, then iTunes) the first time it's needed and\n"
+            "remembers the answer. Needs an internet connection the first time."),
         epilog=(
             "time formats for --since / --until:\n"
             "  30m  3h  2d  1w  today  yesterday  20:00  2026-10-18  \"2026-10-18 20:00\"\n\n"
@@ -1447,7 +1648,11 @@ def main():
             "  radiolog show --today\n"
             "  radiolog show --since 3h --search queen\n"
             "  radiolog show --since \"2026-10-18 20:00\" --until \"2026-10-18 23:00\"\n"
-            "  radiolog show --today --csv today.csv"))
+            "  radiolog show --today --csv today.csv\n"
+            "  radiolog show --sort artist --unique   every song once, A-Z by artist, with play counts\n"
+            "  radiolog show --sort genre             grouped by genre\n"
+            "  radiolog show --genre rock --today     today's rock songs\n"
+            "  radiolog show --sort genre --csv songs.csv   export with a genre column"))
     s.add_argument("--today", action="store_true", help="only songs from today")
     s.add_argument("--since", help="e.g. 3h, 2d, yesterday, 20:00, '2026-10-18 20:00'")
     s.add_argument("--until", help="same formats as --since")
@@ -1455,6 +1660,14 @@ def main():
     s.add_argument("-n", "--limit", type=int, default=None, help="max songs (default: 50 without a time filter)")
     s.add_argument("--csv", metavar="FILE", help="export the selection to a CSV file instead of printing")
     s.add_argument("--no-source", action="store_true", help="hide the station/player column")
+    s.add_argument("--sort", choices=["time", "artist", "title", "genre"], default="time",
+                   help="order: time (default), artist (A-Z), title (A-Z), or genre (grouped under "
+                        "genre headings; genres are looked up online once per song)")
+    s.add_argument("--genre", metavar="TEXT", help="only songs whose genre contains TEXT (e.g. rock, pop, rap)")
+    s.add_argument("--with-genre", action="store_true", help="show each song's genre in [brackets]")
+    s.add_argument("--unique", action="store_true",
+                   help="list each song once (latest play) with how often it was played (×3)")
+    s.add_argument("--refresh-genres", action="store_true", help="look the genres up again")
 
     c = sub.add_parser(
         "config", help="show or change where the song history and downloads are stored",

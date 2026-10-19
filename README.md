@@ -38,6 +38,8 @@ Watching the system media session every 5s   (Ctrl+C to stop)
 - **Full history with timestamps**: every song is saved with the date and time it was
   first discovered; repeats of the same song are skipped.
 - **Search and filter**: by day, time range or text (`--today`, `--since 3h`, `--search queen`).
+- **Sort by artist, title or genre**, or list each song once with its play count. Genres are looked up
+  automatically in free music databases.
 - **Find it again**: open any logged song in a YouTube, YouTube Music or Spotify search with one command.
 - **Download in the best quality available** with a ready-made [yt-dlp](https://github.com/yt-dlp/yt-dlp)
   command: best audio stream with no re-encoding, cover art and tags (or the full video).
@@ -96,6 +98,9 @@ radiolog show --since yesterday
 radiolog show --since "2026-10-18 20:00" --until "2026-10-18 23:00"
 radiolog show --search dżem
 radiolog show --today --csv today.csv            # export to a spreadsheet
+radiolog show --sort artist --unique             # every song once, A-Z by artist, with play counts
+radiolog show --sort genre                       # grouped by genre
+radiolog show --genre rock --today               # today's rock songs
 ```
 
 | Option | Meaning |
@@ -106,6 +111,21 @@ radiolog show --today --csv today.csv            # export to a spreadsheet
 | `-n`, `--limit N` | maximum number of songs |
 | `--csv FILE` | save the selection as CSV instead of printing |
 | `--no-source` | hide the station / player name |
+| `--sort ORDER` | `time` (default), `artist` (A-Z), `title` (A-Z) or `genre` (grouped under genre headings) |
+| `--genre TEXT` | only songs whose genre contains the text (`rock`, `pop`, `rap`…) |
+| `--with-genre` | show each song's genre in `[brackets]` |
+| `--unique` | each song once, with how often it was played (`×3`) |
+| `--refresh-genres` | look the genres up again |
+
+**Sorting** (`--sort`, `--genre`, `--unique`) covers your whole history unless you add a time filter
+or `-n`. Artist sorting ignores a leading "The" (The Hives is under H).
+
+**Genres:** radio streams and players don't send a genre, so radiolog looks each song up in free
+music databases ([Deezer](https://www.deezer.com), then iTunes) the first time it's needed, and
+remembers the answer. The first `--sort genre` over a long history takes a moment (progress is shown;
+Ctrl+C skips the rest). After that it's instant. Songs no database knows are listed under
+*Unknown genre* and are checked again after 30 days. With `--csv`, the export gets a *genre* column
+(and *plays* with `--unique`).
 
 Every song has a number (`#12`), which the commands below use.
 
